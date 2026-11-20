@@ -2,8 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { SignInWithFreebuff, useFreebuffUser } from '@freebuff/auth/react';
 import { requestAngles, requestScript, requestStoryboard } from '../ai/api';
+import {
+  discardAngles,
+  discardStoryboard,
+  restorePreviousAnglesDraft,
+  restorePreviousStoryboardDraft,
+  rotateAngles,
+  rotateStoryboard,
+} from '../ai/drafts';
 import { attachClaimSource, claimSourceOptions, removeClaimSource } from '../ai/claims';
-import { AI_MODELS, DEFAULT_AI_MODEL } from '../ai/models';
+import { AI_MODELS, aiModelLabel, DEFAULT_AI_MODEL } from '../ai/models';
 import type { AiModelId } from '../ai/models';
 import {
   normalizeNarrationWhitespace,
@@ -36,6 +44,7 @@ import { validateBrief } from '../domain/staleness';
 import type { AssetType, Project } from '../domain/types';
 import { formatTimestamp } from '../format';
 import { useStore } from '../state/StoreProvider';
+import { QuotaMeter, useAiQuota } from './AiQuota';
 import { Badge, Panel, SelectField, TextAreaField, TextField } from './ui';
 import { Dialog } from './Dialog';
 
@@ -214,6 +223,7 @@ function useAiRequest() {
   return { pending, error, setError, begin, isCurrent, finish, cancel };
 }
 
+
 export function AiScriptPlanner({ project }: { project: Project }) {
   return (
     <AuthRequired>
@@ -226,12 +236,14 @@ function ScriptPlanner({ project }: { project: Project }) {
   const store = useStore();
   const { proposals, storageError, commit } = useProposalStore(project.id);
   const request = useAiRequest();
+  const quota = useAiQuota();
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [model, setModel] = useState<AiModelId>(DEFAULT_AI_MODEL);
 
   const anglesProposal = proposals.angles;
+  const previousAngles = proposals.previousAngles;
   const scriptProposal = proposals.script;
   const angleFingerprint = angleInputFingerprint(project, anglesProposal?.model ?? model);
   const selectedAngle =
@@ -300,6 +312,18 @@ function ScriptPlanner({ project }: { project: Project }) {
     });
   };
 
+  const restorePreviousAngles = () => {
+    const restored = restorePreviousAnglesDraft(proposals);
+    if (!restored) return;
+    commit({ ...restored, updatedAt: new Date().toISOString() });
+    setNotice('Previous angles restored. The angles they replaced are kept as the previous draft.');
+  };
+
+  const dismissPreviousAngles = () => {
+    commit({ ...proposals, updatedAt: new Date().toISOString(), previousAngles: null });
+    setNotice('Previous angle draft dismissed. The current angles are unchanged.');
+  };
+
   const generateAngles = async () => {
     setConfirmRegenerate(false);
     setNotice(null);
@@ -321,12 +345,21 @@ function ScriptPlanner({ project }: { project: Project }) {
         generatedAt: new Date().toISOString(),
         editedAt: null,
       };
-      persist(generated, null);
-      setNotice('Three angles generated. Selecting one does not change the script.');
+      commit({
+        ...rotateAngles(proposals, generated),
+        updatedAt: new Date().toISOString(),
+        script: null,
+      });
+      setNotice(
+        anglesProposal
+          ? 'Three angles generated. The angles they replaced are kept below for comparison.'
+          : 'Three angles generated. Selecting one does not change the script.',
+      );
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (request.isCurrent(context.sequence)) request.setError(errorMessage(error));
     } finally {
+      quota.refresh();
       request.finish(context.sequence);
     }
   };
@@ -398,6 +431,7 @@ function ScriptPlanner({ project }: { project: Project }) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (request.isCurrent(context.sequence)) request.setError(errorMessage(error));
     } finally {
+      quota.refresh();
       request.finish(context.sequence);
     }
   };
@@ -598,6 +632,7 @@ function ScriptPlanner({ project }: { project: Project }) {
           browser.
         </span>
       </div>
+      <QuotaMeter quota={quota.quota} />
 
       {!anglesProposal ? (
         <p className="muted-small">
@@ -615,7 +650,13 @@ function ScriptPlanner({ project }: { project: Project }) {
             <button
               type="button"
               className="btn btn-small btn-danger"
-              onClick={() => persist(null, scriptProposal)}
+              onClick={() =>
+                commit({
+                  ...discardAngles(proposals),
+                  updatedAt: new Date().toISOString(),
+                  script: scriptProposal,
+                })
+              }
             >
               Discard angles
             </button>
@@ -742,6 +783,43 @@ function ScriptPlanner({ project }: { project: Project }) {
           </div>
         </div>
       )}
+
+      {previousAngles ? (
+        <details className="ai-note">
+          <summary>
+            {anglesProposal ? 'Compare with previous angles' : 'Previous angle draft'} ·{' '}
+            {formatTimestamp(previousAngles.generatedAt)} · {aiModelLabel(previousAngles.model)}
+          </summary>
+          <div className="stack">
+            <p className="muted-small">
+              {anglesProposal
+                ? 'This draft was replaced by the current angles. It is stored separately and never changes the saved script.'
+                : 'The current angles were discarded. This draft is still stored and can be restored.'}
+            </p>
+            <ul className="plain-list">
+              {previousAngles.angles.map((angle) => (
+                <li key={angle.id}>
+                  <strong>{angle.title}</strong>
+                  <div className="muted-small">{angle.hook}</div>
+                  <div className="muted-small">{angle.approach}</div>
+                </li>
+              ))}
+            </ul>
+            <div className="row">
+              <button type="button" className="btn btn-small" onClick={restorePreviousAngles}>
+                Restore previous angles
+              </button>
+              <button
+                type="button"
+                className="btn btn-small btn-danger"
+                onClick={dismissPreviousAngles}
+              >
+                Dismiss previous draft
+              </button>
+            </div>
+          </div>
+        </details>
+      ) : null}
 
       {scriptProposal ? (
         <div className="ai-proposal">
@@ -1079,7 +1157,7 @@ function ScriptPlanner({ project }: { project: Project }) {
       {confirmRegenerate ? (
         <Dialog
           title="Regenerate the three angles?"
-          description="New angles replace the current angle proposal and clear any script proposal generated from it. The saved project script is not changed."
+          description="New angles replace the current angle proposal and clear any script proposal generated from it. The replaced angles stay available for comparison. The saved project script is not changed."
           onDismiss={() => setConfirmRegenerate(false)}
           actions={
             <>
@@ -1143,11 +1221,13 @@ function StoryboardPlanner({ project }: { project: Project }) {
   const store = useStore();
   const { proposals, storageError, commit } = useProposalStore(project.id);
   const request = useAiRequest();
+  const quota = useAiQuota();
   const [acceptOpen, setAcceptOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [model, setModel] = useState<AiModelId>(DEFAULT_AI_MODEL);
   const proposal = proposals.storyboard;
+  const previousStoryboard = proposals.previousStoryboard;
   const currentFingerprint = storyboardInputFingerprint(project, proposal?.model ?? model);
   const stale = proposal !== null && proposal.inputFingerprint !== currentFingerprint;
   const lockedScenes = project.storyboard.scenes.filter((scene) =>
@@ -1176,6 +1256,18 @@ function StoryboardPlanner({ project }: { project: Project }) {
         scene.id === sceneId ? { ...scene, ...patch } : scene,
       ),
     }));
+  };
+
+  const restorePreviousDraft = () => {
+    const restored = restorePreviousStoryboardDraft(proposals);
+    if (!restored) return;
+    commit({ ...restored, updatedAt: new Date().toISOString() });
+    setNotice('Previous storyboard draft restored. The draft it replaced is now the previous draft.');
+  };
+
+  const dismissPreviousDraft = () => {
+    commit({ ...proposals, updatedAt: new Date().toISOString(), previousStoryboard: null });
+    setNotice('Previous storyboard draft dismissed. The current draft is unchanged.');
   };
 
   const generate = async () => {
@@ -1223,15 +1315,19 @@ function StoryboardPlanner({ project }: { project: Project }) {
         editedAt: null,
       };
       commit({
-        ...proposals,
+        ...rotateStoryboard(proposals, generated),
         updatedAt: new Date().toISOString(),
-        storyboard: generated,
       });
-      setNotice('Storyboard proposal generated from the saved script. Review scene narration and pacing before accepting.');
+      setNotice(
+        proposal
+          ? 'Storyboard proposal generated. The draft it replaced is kept below for comparison.'
+          : 'Storyboard proposal generated from the saved script. Review scene narration and pacing before accepting.',
+      );
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (request.isCurrent(context.sequence)) request.setError(errorMessage(error));
     } finally {
+      quota.refresh();
       request.finish(context.sequence);
     }
   };
@@ -1347,6 +1443,7 @@ function StoryboardPlanner({ project }: { project: Project }) {
           browser.
         </span>
       </div>
+      <QuotaMeter quota={quota.quota} />
 
       {project.script.narration.trim() === '' ? (
         <p className="muted-small">There is no saved script yet. Write one before generating a storyboard.</p>
@@ -1478,11 +1575,7 @@ function StoryboardPlanner({ project }: { project: Project }) {
               type="button"
               className="btn btn-danger"
               onClick={() =>
-                commit({
-                  ...proposals,
-                  updatedAt: new Date().toISOString(),
-                  storyboard: null,
-                })
+                commit({ ...discardStoryboard(proposals), updatedAt: new Date().toISOString() })
               }
             >
               Discard proposal
@@ -1493,6 +1586,49 @@ function StoryboardPlanner({ project }: { project: Project }) {
             media is not deleted. No scene locks are bypassed.
           </p>
         </div>
+      ) : null}
+
+      {previousStoryboard ? (
+        <details className="ai-note">
+          <summary>
+            Compare with previous storyboard draft · {formatTimestamp(previousStoryboard.generatedAt)}{' '}
+            · {aiModelLabel(previousStoryboard.model)}
+          </summary>
+          <div className="stack">
+            <p className="muted-small">
+              {previousStoryboard.scenes.length} scene
+              {previousStoryboard.scenes.length === 1 ? '' : 's'},{' '}
+              {formatDuration(
+                previousStoryboard.scenes.reduce(
+                  (total, scene) => total + scene.plannedDuration,
+                  0,
+                ),
+              )}{' '}
+              planned. The draft it replaced is shown below.
+            </p>
+            <ol className="plain-list">
+              {previousStoryboard.scenes.map((scene) => (
+                <li key={scene.id}>
+                  <strong>{scene.title}</strong>{' '}
+                  <span className="muted-small">{formatDuration(scene.plannedDuration)}</span>
+                  <div className="muted-small">{scene.narration}</div>
+                </li>
+              ))}
+            </ol>
+            <div className="row">
+              <button type="button" className="btn btn-small" onClick={restorePreviousDraft}>
+                Restore previous draft
+              </button>
+              <button
+                type="button"
+                className="btn btn-small btn-danger"
+                onClick={dismissPreviousDraft}
+              >
+                Dismiss previous draft
+              </button>
+            </div>
+          </div>
+        </details>
       ) : null}
 
       {project.storyboard.previous ? (

@@ -314,12 +314,19 @@ async function ensureSchema(db: D1Database): Promise<void> {
   schemaReady = true;
 }
 
-async function consumeQuota(db: D1Database, sub: string): Promise<void> {
-  const now = new Date();
-  const day = now.toISOString().slice(0, 10);
-  const minute = now.toISOString().slice(0, 16);
-  const dayKey = `d:${day}`;
-  const minuteKey = `m:${minute}`;
+function windowKeys(now = new Date()): { dayKey: string; minuteKey: string } {
+  return {
+    dayKey: `d:${now.toISOString().slice(0, 10)}`,
+    minuteKey: `m:${now.toISOString().slice(0, 16)}`,
+  };
+}
+
+/** Reads both windows without consuming anything, for the budget display. */
+async function readUsage(
+  db: D1Database,
+  sub: string,
+): Promise<{ day: number; minute: number }> {
+  const { dayKey, minuteKey } = windowKeys();
   const rows = await db
     .prepare(
       'SELECT window_key, requests FROM ai_usage WHERE user_sub = ?1 AND window_key IN (?2, ?3)',
@@ -327,30 +334,56 @@ async function consumeQuota(db: D1Database, sub: string): Promise<void> {
     .bind(sub, dayKey, minuteKey)
     .all<{ window_key: string; requests: number }>();
   const used = new Map((rows.results ?? []).map((row) => [row.window_key, row.requests]));
-  if ((used.get(dayKey) ?? 0) >= DAILY_LIMIT) {
+  return { day: used.get(dayKey) ?? 0, minute: used.get(minuteKey) ?? 0 };
+}
+
+/**
+ * Claims one slot in a single statement, so two requests arriving together
+ * cannot both read "one left" and both take it. False means the window is full.
+ */
+async function takeWindow(
+  db: D1Database,
+  sub: string,
+  key: string,
+  limit: number,
+): Promise<boolean> {
+  const rows = await db
+    .prepare(
+      `INSERT INTO ai_usage (user_sub, window_key, requests) VALUES (?1, ?2, 1)
+       ON CONFLICT(user_sub, window_key) DO UPDATE SET requests = requests + 1
+       WHERE requests < ?3 RETURNING requests`,
+    )
+    .bind(sub, key, limit)
+    .all<{ requests: number }>();
+  return (rows.results?.length ?? 0) > 0;
+}
+
+/** Undoes a claimed slot when a later window refuses the same request. */
+async function releaseWindow(db: D1Database, sub: string, key: string): Promise<void> {
+  await db
+    .prepare(
+      'UPDATE ai_usage SET requests = requests - 1 WHERE user_sub = ?1 AND window_key = ?2 AND requests > 0',
+    )
+    .bind(sub, key)
+    .run();
+}
+
+async function consumeQuota(db: D1Database, sub: string): Promise<void> {
+  const { dayKey, minuteKey } = windowKeys();
+  // The minute window is claimed first so a request the daily limit refuses can
+  // hand its minute slot back instead of spending one for nothing.
+  if (!(await takeWindow(db, sub, minuteKey, MINUTE_LIMIT))) {
     throw new AiError(
       'rate-limit',
-      `The daily AI planning limit (${DAILY_LIMIT} requests) was reached. Try again tomorrow.`,
+      'Too many requests in one minute. Wait a moment and try again.',
     );
   }
-  if ((used.get(minuteKey) ?? 0) >= MINUTE_LIMIT) {
-    throw new AiError(
-      'rate-limit',
-      `Too many requests in one minute. Wait a moment and try again.`,
-    );
-  }
-  await db.batch([
-    db
-      .prepare(
-        'INSERT INTO ai_usage (user_sub, window_key, requests) VALUES (?1, ?2, 1) ON CONFLICT(user_sub, window_key) DO UPDATE SET requests = requests + 1',
-      )
-      .bind(sub, dayKey),
-    db
-      .prepare(
-        'INSERT INTO ai_usage (user_sub, window_key, requests) VALUES (?1, ?2, 1) ON CONFLICT(user_sub, window_key) DO UPDATE SET requests = requests + 1',
-      )
-      .bind(sub, minuteKey),
-  ]);
+  if (await takeWindow(db, sub, dayKey, DAILY_LIMIT)) return;
+  await releaseWindow(db, sub, minuteKey);
+  throw new AiError(
+    'rate-limit',
+    `The daily AI planning limit (${DAILY_LIMIT} requests) was reached. Try again tomorrow.`,
+  );
 }
 
 function normalizeProposal(payload: AiRequestPayload, raw: unknown): unknown {
@@ -422,6 +455,40 @@ async function handleAiRequest(
   }
 }
 
+async function handleQuotaRequest(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+): Promise<Response> {
+  if (request.method !== 'GET') {
+    return jsonError('Use GET for AI planning usage.', 405, { Allow: 'GET' });
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to see AI planning usage.', 401);
+  if (!env.DB) {
+    return jsonError('The AI usage database is not attached to this deployment.', 503);
+  }
+  let usage: { day: number; minute: number };
+  try {
+    await ensureSchema(env.DB);
+    usage = await readUsage(env.DB, user.sub);
+  } catch {
+    return jsonError('AI planning usage could not be read.', 503);
+  }
+  return jsonOk({
+    daily: {
+      used: usage.day,
+      limit: DAILY_LIMIT,
+      remaining: Math.max(0, DAILY_LIMIT - usage.day),
+    },
+    minute: {
+      used: usage.minute,
+      limit: MINUTE_LIMIT,
+      remaining: Math.max(0, MINUTE_LIMIT - usage.minute),
+    },
+  });
+}
+
 function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
   auth ??= createFreebuffAuth({
     clientId: env.FREEBUFF_CLIENT_ID,
@@ -434,6 +501,14 @@ function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
   const authInstance = auth;
   wrapped ??= authInstance.wrap(async (request: Request, requestEnv: Env) => {
     const url = new URL(request.url);
+    if (url.pathname === '/api/ai/quota') {
+      try {
+        return await handleQuotaRequest(request, requestEnv, authInstance);
+      } catch {
+        console.error('AI quota route failed');
+        return jsonError('AI planning usage is unavailable right now.', 500);
+      }
+    }
     if (url.pathname === '/api/ai/plan') {
       try {
         return await handleAiRequest(request, requestEnv, authInstance);

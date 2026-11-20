@@ -120,6 +120,9 @@ export interface ProjectProposals {
   angles: AngleProposal | null;
   script: ScriptProposal | null;
   storyboard: StoryboardProposal | null;
+  /** The draft a regeneration replaced, kept so it can be compared and restored. */
+  previousAngles: AngleProposal | null;
+  previousStoryboard: StoryboardProposal | null;
 }
 
 export type AiErrorCode =
@@ -152,5 +155,7 @@ export function emptyProposals(projectId: string, now = new Date().toISOString()
     angles: null,
     script: null,
     storyboard: null,
+    previousAngles: null,
+    previousStoryboard: null,
   };
 }

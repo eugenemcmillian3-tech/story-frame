@@ -739,6 +739,10 @@ a {
   cursor: pointer;
 }
 
+.ai-quota {
+  margin: 0 0 4px;
+}
+
 .ai-pending {
   padding: 10px 12px;
   border: 1px solid var(--border);

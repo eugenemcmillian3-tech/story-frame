@@ -82,6 +82,15 @@ function fakeDb(seed: Array<[string, string, number]> = []) {
           return statement;
         },
         async all<T = unknown>() {
+          // The quota claim is one conditional upsert; a full window returns no row.
+          if (query.includes('RETURNING requests')) {
+            const key = `${String(args[0])}|${String(args[1])}`;
+            const limit = Number(args[2]);
+            const current = rows.get(key) ?? 0;
+            if (current >= limit) return { results: [] as T[] };
+            rows.set(key, current + 1);
+            return { results: [{ requests: current + 1 } as T] };
+          }
           if (!query.includes('SELECT window_key')) return { results: [] as T[] };
           const sub = String(args[0]);
           const results: T[] = [];
@@ -94,9 +103,10 @@ function fakeDb(seed: Array<[string, string, number]> = []) {
           return { results };
         },
         async run() {
-          if (query.includes('INSERT INTO ai_usage')) {
+          if (query.includes('UPDATE ai_usage')) {
             const key = `${String(args[0])}|${String(args[1])}`;
-            rows.set(key, (rows.get(key) ?? 0) + 1);
+            const current = rows.get(key) ?? 0;
+            if (current > 0) rows.set(key, current - 1);
           }
           return {};
         },
@@ -258,6 +268,66 @@ describe('POST /api/ai/plan quotas', () => {
     expect(response.status).toBe(200);
     expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(1);
     expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(1);
+  });
+
+  it('stops at the minute limit when two requests arrive together', async () => {
+    const db = fakeDb([['user_1', MINUTE_KEY, 5]]);
+    providerFetch.mockResolvedValue(chatReply(JSON.stringify(anglesProposal)));
+    const first = await worker.fetch(post(payload), testEnv(db) as never);
+    const second = await worker.fetch(post(payload), testEnv(db) as never);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(6);
+    expect(providerFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands the minute slot back when the daily limit refuses the request', async () => {
+    const db = fakeDb([['user_1', DAY_KEY, 40]]);
+    const response = await worker.fetch(post(payload), testEnv(db) as never);
+    expect(response.status).toBe(429);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`) ?? 0).toBe(0);
+    expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(40);
+  });
+});
+
+describe('GET /api/ai/quota', () => {
+  const get = () => new Request(`${APP_ORIGIN}/api/ai/quota`);
+
+  it('reports what is left without consuming any of it', async () => {
+    const db = fakeDb([
+      ['user_1', DAY_KEY, 4],
+      ['user_1', MINUTE_KEY, 2],
+    ]);
+    const response = await worker.fetch(get(), testEnv(db) as never);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.daily).toEqual({ used: 4, limit: 40, remaining: 36 });
+    expect(body.minute).toEqual({ used: 2, limit: 6, remaining: 4 });
+    expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(4);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(2);
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
+  it('reports an untouched budget for a user with no usage', async () => {
+    const response = await worker.fetch(get(), testEnv() as never);
+    const body = (await response.json()) as Record<string, { remaining: number }>;
+    expect(response.status).toBe(200);
+    expect(body.daily.remaining).toBe(40);
+    expect(body.minute.remaining).toBe(6);
+  });
+
+  it('requires sign-in and rejects other methods', async () => {
+    mocks.getUser.mockResolvedValue(null);
+    const signedOut = await worker.fetch(get(), testEnv() as never);
+    expect(signedOut.status).toBe(401);
+
+    mocks.getUser.mockResolvedValue({ sub: 'user_1' });
+    const wrongMethod = await worker.fetch(
+      new Request(`${APP_ORIGIN}/api/ai/quota`, { method: 'POST' }),
+      testEnv() as never,
+    );
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get('allow')).toBe('GET');
   });
 });
 

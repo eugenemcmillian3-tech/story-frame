@@ -96,6 +96,61 @@ async function post(
   return { response: record as unknown as RawResponse, fingerprint };
 }
 
+export interface QuotaWindow {
+  used: number;
+  limit: number;
+  remaining: number;
+}
+
+export interface AiQuota {
+  daily: QuotaWindow;
+  minute: QuotaWindow;
+}
+
+function readQuotaWindow(value: unknown): QuotaWindow | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const window = value as Record<string, unknown>;
+  const { used, limit, remaining } = window;
+  if (typeof used !== 'number' || typeof limit !== 'number' || typeof remaining !== 'number') {
+    return null;
+  }
+  return { used, limit, remaining };
+}
+
+/** Reads the remaining budget without spending any of it. */
+export async function fetchQuota(signal?: AbortSignal): Promise<AiQuota> {
+  let response: Response;
+  try {
+    response = await fetch('/api/ai/quota', {
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new AiError('network', 'AI planning usage could not be read.');
+  }
+  if (!response.ok) {
+    throw new AiError(codeForStatus(response.status), await readError(response));
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new AiError('invalid-response', 'AI planning usage could not be read.');
+  }
+  const record =
+    typeof body === 'object' && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const daily = readQuotaWindow(record.daily);
+  const minute = readQuotaWindow(record.minute);
+  if (!daily || !minute) {
+    throw new AiError('invalid-response', 'AI planning usage could not be read.');
+  }
+  return { daily, minute };
+}
+
 export async function requestAngles(
   project: Project,
   model: AiModelId = DEFAULT_AI_MODEL,

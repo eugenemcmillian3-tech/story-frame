@@ -2,7 +2,7 @@ import { browserStorage, isQuotaError } from '../persistence/storage';
 import { DEFAULT_AI_MODEL, isAiModelId } from './models';
 import type { AiModelId } from './models';
 import { emptyProposals } from './types';
-import type { ProjectProposals } from './types';
+import type { AngleProposal, ProjectProposals, StoryboardProposal } from './types';
 
 function storedModel(value: Record<string, unknown>): AiModelId {
   return isAiModelId(value.model) ? value.model : DEFAULT_AI_MODEL;
@@ -16,6 +16,16 @@ function keyFor(projectId: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function previousAnglesDraft(value: unknown): AngleProposal | null {
+  if (!isRecord(value) || !Array.isArray(value.angles)) return null;
+  return { ...value, model: storedModel(value) } as AngleProposal;
+}
+
+function previousStoryboardDraft(value: unknown): StoryboardProposal | null {
+  if (!isRecord(value) || !Array.isArray(value.scenes)) return null;
+  return { ...value, model: storedModel(value) } as StoryboardProposal;
 }
 
 function highLevelShape(value: unknown, projectId: string): ProjectProposals | null {
@@ -66,6 +76,8 @@ function highLevelShape(value: unknown, projectId: string): ProjectProposals | n
       storyboard === null
         ? null
         : ({ ...storyboard, model: storedModel(storyboard) } as ProjectProposals['storyboard']),
+    previousAngles: previousAnglesDraft(value.previousAngles),
+    previousStoryboard: previousStoryboardDraft(value.previousStoryboard),
   };
 }
 

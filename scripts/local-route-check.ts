@@ -153,6 +153,14 @@ function fakeDb() {
           return statement;
         },
         async all<T = unknown>() {
+          if (query.includes('RETURNING requests')) {
+            const key = `${String(args[0])}|${String(args[1])}`;
+            const limit = Number(args[2]);
+            const current = rows.get(key) ?? 0;
+            if (current >= limit) return { results: [] as T[] };
+            rows.set(key, current + 1);
+            return { results: [{ requests: current + 1 } as T] };
+          }
           if (!query.includes('SELECT window_key')) return { results: [] as T[] };
           const results: T[] = [];
           for (const key of args.slice(1)) {
@@ -162,9 +170,10 @@ function fakeDb() {
           return { results };
         },
         async run() {
-          if (query.includes('INSERT INTO ai_usage')) {
+          if (query.includes('UPDATE ai_usage')) {
             const key = `${String(args[0])}|${String(args[1])}`;
-            rows.set(key, (rows.get(key) ?? 0) + 1);
+            const current = rows.get(key) ?? 0;
+            if (current > 0) rows.set(key, current - 1);
           }
           return {};
         },
@@ -317,6 +326,14 @@ const session = await call('/auth/freebuff/session');
 const sessionBody = (await session.json()) as { user?: { sub?: string } };
 check('session reports the signed-in user', sessionBody.user?.sub === USER_SUB, `sub ${sessionBody.user?.sub ?? 'none'}`);
 
+const emptyQuota = await call('/api/ai/quota');
+const emptyBody = (await emptyQuota.json()) as { daily?: { used?: number; remaining?: number } };
+check(
+  'quota endpoint reports an untouched budget',
+  emptyQuota.status === 200 && emptyBody.daily?.used === 0 && emptyBody.daily?.remaining === 40,
+  `status ${emptyQuota.status} used ${emptyBody.daily?.used ?? '?'}`,
+);
+
 const started = Date.now();
 const plan = await call('/api/ai/plan', { method: 'POST', body: anglesPayload });
 const planBody = (await plan.json()) as {
@@ -365,6 +382,17 @@ check(
   'quota counted all three requests in D1',
   dayCount === 3 && minuteCount > 0 && minuteCount <= 3,
   `day ${dayCount}, minute ${minuteCount}`,
+);
+
+const spent = await call('/api/ai/quota');
+const spentBody = (await spent.json()) as {
+  daily?: { used?: number; remaining?: number };
+  minute?: { remaining?: number };
+};
+check(
+  'quota endpoint reports the three requests',
+  spent.status === 200 && spentBody.daily?.used === 3 && spentBody.daily?.remaining === 37,
+  `used ${spentBody.daily?.used ?? '?'}, left ${spentBody.daily?.remaining ?? '?'} today, ${spentBody.minute?.remaining ?? '?'} this minute`,
 );
 
 db.rows.set(`${USER_SUB}|d:${day}`, 40);
