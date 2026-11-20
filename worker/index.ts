@@ -43,6 +43,8 @@ interface Env {
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
   CF_AI_BASE?: string;
+  DEEPGRAM_API_KEY?: string;
+  DEEPGRAM_API_BASE?: string;
   LEONARDO_API_KEY?: string;
   LEONARDO_API_BASE?: string;
 }

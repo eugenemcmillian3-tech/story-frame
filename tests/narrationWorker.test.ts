@@ -6,7 +6,7 @@ import {
   parseNarrationRequest,
 } from '../worker/narration';
 
-const ENV = { CF_ACCOUNT_ID: 'acct', CF_API_TOKEN: 'token', CF_AI_BASE: 'https://ai.test/client/v4' };
+const ENV = { DEEPGRAM_API_KEY: 'dg_key', DEEPGRAM_API_BASE: 'https://speak.test' };
 
 interface Row {
   id: string;
@@ -131,7 +131,7 @@ function request(overrides: Record<string, unknown> = {}) {
   return parseNarrationRequest({
     id: 'nar_1',
     text: 'Yawning is contagious, and the evidence for why is thin.',
-    voice: 'luna',
+    voice: 'aura-luna-en',
     purpose: 'narration',
     projectId: 'prj_1',
     scriptFingerprint: 'fnv1a:abc:52',
@@ -152,7 +152,7 @@ afterEach(() => {
 
 describe('narration request validation', () => {
   it('accepts a documented voice and rejects an invented one', () => {
-    expect(request().voice).toBe('luna');
+    expect(request().voice).toBe('aura-luna-en');
     expect(() => request({ voice: 'robot' })).toThrow(NarrationError);
   });
 
@@ -165,9 +165,9 @@ describe('narration request validation', () => {
 describe('narration generation', () => {
   it('returns the provider audio and records the job with its real character count', async () => {
     const db = new FakeDb();
-    const calls: string[] = [];
-    vi.stubGlobal('fetch', async (url: string) => {
-      calls.push(String(url));
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push({ url: String(url), init });
       return mp3();
     });
     const input = request();
@@ -179,7 +179,10 @@ describe('narration generation', () => {
     expect(result.job.characters).toBe(input.text.length);
     expect(result.job.estimatedUsd).toBeCloseTo((input.text.length / 1000) * 0.015, 6);
     expect(result.job.attempts).toBe(1);
-    expect(calls[0]).toBe('https://ai.test/client/v4/accounts/acct/ai/run/@cf/deepgram/aura-1');
+    // The voice is the model id, sent as the query parameter Deepgram documents.
+    expect(calls[0].url).toBe('https://speak.test/v1/speak?model=aura-luna-en');
+    expect(new Headers(calls[0].init.headers).get('authorization')).toBe('Token dg_key');
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ text: input.text });
     expect(db.rows).toHaveLength(1);
     expect(db.rows[0].status).toBe('completed');
     expect(db.rows[0].script_fingerprint).toBe('fnv1a:abc:52');
@@ -235,7 +238,7 @@ describe('narration generation', () => {
       return new Response('no', { status: 401 });
     });
     await expect(generateNarration(db, ENV, 'user_1', request())).rejects.toThrow(
-      /CF_ACCOUNT_ID and CF_API_TOKEN/,
+      /DEEPGRAM_API_KEY/,
     );
     expect(calls).toBe(1);
   });
@@ -269,9 +272,9 @@ describe('narration generation', () => {
           user_sub: 'user_1',
           project_id: null,
           purpose: 'sample',
-          provider: 'Deepgram Aura',
-          model: '@cf/deepgram/aura-1',
-          voice: 'luna',
+          provider: 'Deepgram',
+          model: 'aura-1',
+          voice: 'aura-luna-en',
           characters: 10,
           estimated_usd: 0.00015,
           script_fingerprint: null,

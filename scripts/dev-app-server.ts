@@ -194,6 +194,7 @@ function envFor(origin: string) {
     APP_ORIGIN: origin,
     CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
     CF_API_TOKEN: process.env.CF_API_TOKEN,
+    DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
     LEONARDO_API_KEY: process.env.LEONARDO_API_KEY,
   };
 }
@@ -257,6 +258,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  app origin   ${APP_ORIGIN}`);
   console.log(`  dev issuer   ${APP_ORIGIN}/oidc (signs in as ${USER.sub})`);
   console.log(
-    `  credentials  cloudflare ${process.env.CF_ACCOUNT_ID && process.env.CF_API_TOKEN ? 'set' : 'missing'} · leonardo ${process.env.LEONARDO_API_KEY ? 'set' : 'missing'}`,
+    `  credentials  cloudflare ${process.env.CF_ACCOUNT_ID && process.env.CF_API_TOKEN ? 'set' : 'missing'} · deepgram ${process.env.DEEPGRAM_API_KEY ? 'set' : 'missing'} · leonardo ${process.env.LEONARDO_API_KEY ? 'set' : 'missing'}`,
   );
 });

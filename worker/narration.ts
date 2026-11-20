@@ -3,11 +3,12 @@
  * offers. Every endpoint, parameter and price is quoted from the provider's own
  * documentation, checked on 2026-11-20.
  *
- * Deepgram Aura on Cloudflare Workers AI:
- * - POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/
- *     @cf/deepgram/aura-1
- *   with `{ text, speaker, encoding: "mp3" }` answers with the MP3 bytes and
- *   `content-type: audio/mpeg` (verified against the live API).
+ * Deepgram's REST API, with the deployment's own DEEPGRAM_API_KEY:
+ * - POST https://api.deepgram.com/v1/speak?model=aura-luna-en with
+ *   `authorization: Token {key}` and `{ text }` answers with the audio bytes and
+ *   `content-type: audio/mpeg`; mp3 is the documented default encoding.
+ * - Aura-1 voices use the model name `aura-{voice}-en`, so the chosen voice is
+ *   the model id sent in the query string.
  * - $0.015 per 1k characters. The request is billed once it reaches the
  *   provider, so a failed or aborted call is still counted here.
  *
@@ -74,10 +75,9 @@ export interface NarrationDatabase {
 }
 
 export interface NarrationEnv {
-  CF_ACCOUNT_ID?: string;
-  CF_API_TOKEN?: string;
-  /** Test-only override; production calls Cloudflare's own API host. */
-  CF_AI_BASE?: string;
+  DEEPGRAM_API_KEY?: string;
+  /** Test-only override; production calls Deepgram's own API host. */
+  DEEPGRAM_API_BASE?: string;
 }
 
 /** One billed generation plus one retry at most. */
@@ -87,7 +87,7 @@ const PROVIDER_TIMEOUT_MS = 60_000;
 const DAILY_LIMIT = 20;
 const MINUTE_LIMIT = 3;
 const MAX_ID_LENGTH = 120;
-const DEFAULT_CF_AI_ROOT = 'https://api.cloudflare.com/client/v4';
+const DEFAULT_DEEPGRAM_API = 'https://api.deepgram.com';
 
 const schemaReady = new WeakSet<object>();
 
@@ -289,18 +289,18 @@ async function attemptSpeech(
   voice: string,
   attempt: number,
 ): Promise<SpeechAttempt> {
-  const root = (env.CF_AI_BASE || DEFAULT_CF_AI_ROOT).replace(/\/+$/, '');
-  const url = `${root}/accounts/${env.CF_ACCOUNT_ID}/ai/run/${NARRATION_MODEL.model}`;
+  const root = (env.DEEPGRAM_API_BASE || DEFAULT_DEEPGRAM_API).replace(/\/+$/, '');
+  const url = `${root}/v1/speak?model=${encodeURIComponent(voice)}`;
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${env.CF_API_TOKEN}`,
+        authorization: `Token ${env.DEEPGRAM_API_KEY}`,
         'content-type': 'application/json',
         accept: 'audio/mpeg',
       },
-      body: JSON.stringify({ text, speaker: voice, encoding: 'mp3' }),
+      body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     });
   } catch {
@@ -313,7 +313,7 @@ async function attemptSpeech(
       retryable: false,
       error: new NarrationError(
         503,
-        'The deployment’s text-to-speech credentials were refused. Check CF_ACCOUNT_ID and CF_API_TOKEN in Sites → Secrets.',
+        'The deployment’s Deepgram API key was refused. Check DEEPGRAM_API_KEY in Sites → Secrets.',
       ),
     };
   }
@@ -379,10 +379,10 @@ export async function generateNarration(
   userSub: string,
   request: NarrationRequest,
 ): Promise<{ job: NarrationJob; bytes: Uint8Array; mimeType: string }> {
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+  if (!env.DEEPGRAM_API_KEY) {
     throw new NarrationError(
       503,
-      'Narration is not configured on this deployment. Add CF_ACCOUNT_ID and CF_API_TOKEN in Sites → Secrets.',
+      'Narration is not configured on this deployment. Add DEEPGRAM_API_KEY in Sites → Secrets.',
     );
   }
 

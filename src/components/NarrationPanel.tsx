@@ -473,9 +473,9 @@ function NarrationBody({ project }: { project: Project }) {
                   </button>
                 </div>
                 <p className="muted-small">
-                  Regenerating speaks the same text again, so its length will not change: the
-                  provider offers no speaking-rate setting. Editing the script is the only way to
-                  shorten or lengthen the narration.
+                  Regenerating speaks the same text again at the voice’s natural pace, so its length
+                  will not change. Editing the script is the only way to shorten or lengthen the
+                  narration.
                 </p>
               </>
             ) : null}

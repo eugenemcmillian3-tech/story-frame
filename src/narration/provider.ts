@@ -1,29 +1,31 @@
 /**
- * The one text-to-speech provider this app offers, quoted from the provider's
- * own documentation, checked on 2026-11-20.
+ * The one text-to-speech provider this app offers, quoted from Deepgram's own
+ * documentation, checked on 2026-11-20.
  *
- * Deepgram Aura through Cloudflare Workers AI:
- * - POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/
- *     @cf/deepgram/aura-1
- *   with `{ text, speaker, encoding }` answers with the audio bytes themselves
- *   (`content-type: audio/mpeg`), not a JSON envelope.
- * - Speakers: angus, asteria, arcas, orion, orpheus, athena, luna, zeus,
- *   perseus, helios, hera, stella. `angus` is the documented default.
+ * Deepgram's REST API, called with the deployment's own DEEPGRAM_API_KEY:
+ * - POST https://api.deepgram.com/v1/speak?model=aura-luna-en
+ *   with `Authorization: Token {key}` and `{ text }` answers with the audio
+ *   bytes themselves; mp3 is the documented default encoding, so no `encoding`
+ *   parameter is needed.
+ * - Aura-1 English voices use the model name `aura-{voice}-en`, so the voice the
+ *   user picks is also the model sent to the provider. `aura-asteria-en` is the
+ *   documented default.
  * - $0.015 per 1k characters of input text.
- * - The model exposes no speaking-rate, pitch or phoneme parameters, so this
- *   app offers no pronunciation override and cannot regenerate "faster" — only
- *   different text can change the pacing. No voice cloning exists here.
+ * - The endpoint documents a `speed` multiplier, but this app sends none, so the
+ *   same text always speaks at the voice's natural pace. There is no phoneme
+ *   override and no voice cloning.
  */
 
 export interface NarrationVoice {
-  /** The provider's own speaker id, sent verbatim. */
+  /** The provider's own model id for this voice, sent verbatim. */
   id: string;
-  /** The speaker id as shown in the picker. No traits are invented. */
+  /** The voice as shown in the picker. No traits are invented. */
   label: string;
 }
 
 export interface NarrationModelSpec {
   provider: string;
+  /** The voice family; the per-request model id lives on the voice. */
   model: string;
   label: string;
   voices: readonly NarrationVoice[];
@@ -37,7 +39,7 @@ export interface NarrationModelSpec {
 
 export const SAMPLE_MAX_CHARACTERS = 240;
 
-const VOICE_IDS = [
+const VOICE_NAMES = [
   'angus',
   'asteria',
   'arcas',
@@ -52,16 +54,15 @@ const VOICE_IDS = [
   'stella',
 ] as const;
 
-function voiceLabel(id: string): string {
-  return id.charAt(0).toUpperCase() + id.slice(1);
-}
-
 export const NARRATION_MODEL: NarrationModelSpec = {
-  provider: 'Deepgram Aura',
-  model: '@cf/deepgram/aura-1',
-  label: 'Deepgram Aura (Workers AI)',
-  voices: VOICE_IDS.map((id) => ({ id, label: voiceLabel(id) })),
-  defaultVoice: 'angus',
+  provider: 'Deepgram',
+  model: 'aura-1',
+  label: 'Deepgram Aura',
+  voices: VOICE_NAMES.map((name) => ({
+    id: `aura-${name}-en`,
+    label: name.charAt(0).toUpperCase() + name.slice(1),
+  })),
+  defaultVoice: 'aura-angus-en',
   usdPerThousandCharacters: 0.015,
   maxCharacters: 5000,
   supportsSpeakingRate: false,
@@ -70,9 +71,9 @@ export const NARRATION_MODEL: NarrationModelSpec = {
 
 export const NARRATION_CAPABILITY_NOTES = {
   speakingRate:
-    'Aura has no speaking-rate setting, so regenerating the same text cannot change its length. Edit the script to change pacing.',
+    'This app sends no speed setting, so regenerating the same text speaks it at the same natural pace. Edit the script to change pacing.',
   pronunciation:
-    'Aura has no phoneme or pronunciation override. Spell a tricky word the way you want it said in the script; the narration reads the saved script.',
+    'Deepgram’s speech endpoint takes no phoneme or pronunciation override. Spell a tricky word the way you want it said in the script; the narration reads the saved script.',
   cloning: 'This app does not offer voice cloning, and the provider exposes no cloning parameters.',
 } as const;
 

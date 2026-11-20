@@ -19,9 +19,9 @@ import {
 const NOW = '2026-01-01T00:00:00.000Z';
 
 const TAKE: NarrationTake = {
-  provider: 'Deepgram Aura',
-  model: '@cf/deepgram/aura-1',
-  voice: 'luna',
+  provider: 'Deepgram',
+  model: 'aura-1',
+  voice: 'aura-luna-en',
   scriptFingerprint: 'fnv1a:deadbeef:12',
   characters: 120,
   estimatedUsd: 0.0018,
@@ -48,8 +48,8 @@ describe('narration provider facts', () => {
   });
 
   it('accepts only the speakers the provider documents', () => {
-    expect(isNarrationVoice('luna')).toBe(true);
-    expect(isNarrationVoice('angus')).toBe(true);
+    expect(isNarrationVoice('aura-luna-en')).toBe(true);
+    expect(isNarrationVoice('aura-angus-en')).toBe(true);
     expect(isNarrationVoice('not-a-voice')).toBe(false);
   });
 

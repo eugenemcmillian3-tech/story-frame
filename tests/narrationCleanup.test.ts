@@ -30,8 +30,8 @@ const PROJECT_ID = 'prj_restore';
 
 function narration(id: string, voice: string, replacesAssetId: string | null): AudioAssetRecord {
   const generation: NarrationTake = {
-    provider: 'Deepgram Aura',
-    model: '@cf/deepgram/aura-1',
+    provider: 'Deepgram',
+    model: 'aura-1',
     voice,
     scriptFingerprint: 'fnv1a:abc:917',
     characters: 917,
