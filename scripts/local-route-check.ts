@@ -230,9 +230,11 @@ function check(label: string, ok: boolean, detail = ''): void {
   results.push(`${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`);
 }
 
+const MODEL = 'deepseek-v4.1-flash';
+
 const anglesPayload = {
   operation: 'angles',
-  model: 'deepseek-v4.1-flash',
+  model: MODEL,
   input: {
     brief: {
       topic: 'How a bicycle stays upright',
@@ -256,12 +258,9 @@ const anglesPayload = {
   },
 };
 
-const narration =
-  'A moving bicycle holds itself up, and the trick happens at the front wheel. When the bike leans, the front wheel steers toward the lean, moving the wheels back under the centre of mass. At very low speeds this self-correction is weaker, so the rider has to steer deliberately to keep balance.';
-
 const scriptPayload = {
   operation: 'script',
-  model: 'deepseek-v4.1-flash',
+  model: MODEL,
   input: {
     ...anglesPayload.input,
     angle: {
@@ -273,9 +272,12 @@ const scriptPayload = {
   },
 };
 
+const narration =
+  'A moving bicycle holds itself up, and the trick happens at the front wheel. When the bike leans, the front wheel steers toward the lean, moving the wheels back under the centre of mass. At very low speeds this self-correction is weaker, so the rider has to steer deliberately to keep balance.';
+
 const storyboardPayload = {
   operation: 'storyboard',
-  model: 'deepseek-v4.1-flash',
+  model: MODEL,
   input: {
     brief: anglesPayload.input.brief,
     script: { narration, fingerprint: computeScriptFingerprint(narration) },
