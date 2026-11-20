@@ -5,17 +5,24 @@ import { parseAiRequest, requestFingerprint } from '../src/ai/input';
 import type { AiRequestPayload } from '../src/ai/input';
 import { AiError } from '../src/ai/types';
 import type { AiOperation } from '../src/ai/types';
+import {
+  IMAGE_NOT_CONFIGURED,
+  ImageJobError,
+  ensureImageSchema,
+  fetchImageJobImage,
+  parseImageJobRequest,
+  readImageJob,
+  submitImageJob,
+} from './imageJobs';
 
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
-  first<T = unknown>(): Promise<T | null>;
   all<T = unknown>(): Promise<{ results?: T[] }>;
   run(): Promise<unknown>;
 }
 
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
-  batch(statements: D1PreparedStatement[]): Promise<unknown>;
 }
 
 interface Env {
@@ -26,11 +33,18 @@ interface Env {
   APP_ORIGIN: string;
   OLLAMA_API_KEY?: string;
   OLLAMA_API_BASE?: string;
+  CF_ACCOUNT_ID?: string;
+  CF_API_TOKEN?: string;
+  CF_AI_BASE?: string;
 }
 
 const MAX_BODY_BYTES = 180_000;
+const MAX_IMAGE_BODY_BYTES = 100_000;
 const DAILY_LIMIT = 40;
 const MINUTE_LIMIT = 6;
+/** Image generations are billed per image, so they get their own smaller budget. */
+const IMAGE_DAILY_LIMIT = 20;
+const IMAGE_MINUTE_LIMIT = 4;
 const PROVIDER_TIMEOUT_MS = 60_000;
 const DEFAULT_OLLAMA_BASE = 'https://ollama.com';
 const MAX_TOKENS: Record<AiOperation, number> = {
@@ -41,7 +55,8 @@ const MAX_TOKENS: Record<AiOperation, number> = {
 
 let auth: FreebuffAuth | undefined;
 let wrapped: ((request: Request, env: Env) => Promise<Response>) | undefined;
-let schemaReady = false;
+/** Per-database, so a new binding never inherits another database's readiness. */
+const schemaReady = new WeakSet<object>();
 
 function jsonError(message: string, status: number, extra: Record<string, string> = {}): Response {
   return Response.json(
@@ -57,8 +72,9 @@ function jsonError(message: string, status: number, extra: Record<string, string
   );
 }
 
-function jsonOk(value: unknown): Response {
+function jsonOk(value: unknown, status = 200): Response {
   return Response.json(value, {
+    status,
     headers: {
       'Cache-Control': 'private, no-store',
       'X-Content-Type-Options': 'nosniff',
@@ -300,7 +316,7 @@ export async function generateProposal(
 
 
 async function ensureSchema(db: D1Database): Promise<void> {
-  if (schemaReady) return;
+  if (schemaReady.has(db)) return;
   await db
     .prepare(
       `CREATE TABLE IF NOT EXISTS ai_usage (
@@ -311,7 +327,7 @@ async function ensureSchema(db: D1Database): Promise<void> {
       )`,
     )
     .run();
-  schemaReady = true;
+  schemaReady.add(db);
 }
 
 function windowKeys(now = new Date()): { dayKey: string; minuteKey: string } {
@@ -366,6 +382,43 @@ async function releaseWindow(db: D1Database, sub: string, key: string): Promise<
     )
     .bind(sub, key)
     .run();
+}
+
+function imageWindowKeys(now = new Date()): { dayKey: string; minuteKey: string } {
+  return {
+    dayKey: `img:d:${now.toISOString().slice(0, 10)}`,
+    minuteKey: `img:m:${now.toISOString().slice(0, 16)}`,
+  };
+}
+
+/** Claims one image slot; a refused claim means the window is full. */
+async function consumeImageQuota(db: D1Database, sub: string): Promise<void> {
+  const { dayKey, minuteKey } = imageWindowKeys();
+  if (!(await takeWindow(db, sub, minuteKey, IMAGE_MINUTE_LIMIT))) {
+    throw new ImageJobError(
+      429,
+      'Too many image requests in one minute. Wait a moment and try again.',
+    );
+  }
+  if (await takeWindow(db, sub, dayKey, IMAGE_DAILY_LIMIT)) return;
+  await releaseWindow(db, sub, minuteKey);
+  throw new ImageJobError(
+    429,
+    `The daily image generation limit (${IMAGE_DAILY_LIMIT} images) was reached. Try again tomorrow.`,
+  );
+}
+
+/** Hand both slots back when no billable work was started. */
+async function releaseImageQuota(db: D1Database, sub: string): Promise<void> {
+  const { dayKey, minuteKey } = imageWindowKeys();
+  await releaseWindow(db, sub, dayKey);
+  await releaseWindow(db, sub, minuteKey);
+}
+
+function imageErrorResponse(error: unknown): Response {
+  if (error instanceof ImageJobError) return jsonError(error.message, error.status);
+  console.error('Image route failed');
+  return jsonError('The image generation service is unavailable right now.', 500);
 }
 
 async function consumeQuota(db: D1Database, sub: string): Promise<void> {
@@ -489,6 +542,129 @@ async function handleQuotaRequest(
   });
 }
 
+const IMAGE_JOB_PATH = /^\/api\/images\/jobs\/([A-Za-z0-9_-]{8,80})(?:\/(image))?$/;
+
+async function readBoundedText(request: Request, limit: number): Promise<string | null> {
+  const contentLength = request.headers.get('content-length');
+  if (contentLength !== null && Number(contentLength) > limit) return null;
+  let raw: string;
+  try {
+    raw = await request.text();
+  } catch {
+    return null;
+  }
+  return new TextEncoder().encode(raw).byteLength > limit ? null : raw;
+}
+
+async function handleImageJobCreate(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return jsonError('Use POST to start an image job.', 405, { Allow: 'POST' });
+  }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to generate images.', 401);
+  if (!env.DB) {
+    return jsonError('The image job database is not attached to this deployment.', 503);
+  }
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
+    return jsonError(IMAGE_NOT_CONFIGURED, 503);
+  }
+  const raw = await readBoundedText(request, MAX_IMAGE_BODY_BYTES);
+  if (raw === null) return jsonError('The image request is too large.', 413);
+  let body: unknown;
+  try {
+    body = JSON.parse(raw) as unknown;
+  } catch {
+    return jsonError('The image request is not valid JSON.', 400);
+  }
+
+  let parsed;
+  try {
+    parsed = parseImageJobRequest(body);
+  } catch (error) {
+    return imageErrorResponse(error);
+  }
+
+  try {
+    await ensureSchema(env.DB);
+    await consumeImageQuota(env.DB, user.sub);
+    const { job, created } = await submitImageJob(env.DB, env, user.sub, parsed);
+    if (!created) await releaseImageQuota(env.DB, user.sub);
+    return jsonOk({ job }, created ? 201 : 200);
+  } catch (error) {
+    // A rejected or unacknowledged submission did not start billable work, so
+    // its quota slot goes back. Provider failures after acknowledgement keep it.
+    if (
+      error instanceof ImageJobError &&
+      (error.status === 400 ||
+        error.status === 409 ||
+        error.status === 429 ||
+        error.status === 503)
+    ) {
+      await releaseImageQuota(env.DB, user.sub);
+    }
+    return imageErrorResponse(error);
+  }
+}
+
+async function handleImageJobGet(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+  id: string,
+): Promise<Response> {
+  if (request.method !== 'GET') {
+    return jsonError('Use GET to check an image job.', 405, { Allow: 'GET' });
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to check this image.', 401);
+  if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
+  try {
+    const job = await readImageJob(env.DB, user.sub, id);
+    if (!job) return jsonError('That image job was not found.', 404);
+    return jsonOk({ job });
+  } catch (error) {
+    return imageErrorResponse(error);
+  }
+}
+
+async function handleImageJobImage(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+  id: string,
+): Promise<Response> {
+  if (request.method !== 'GET') {
+    return jsonError('Use GET to download a generated image.', 405, { Allow: 'GET' });
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to download this image.', 401);
+  if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
+  try {
+    const { bytes, mimeType } = await fetchImageJobImage(env.DB, user.sub, id);
+    const body = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    return new Response(body, {
+      headers: {
+        'Content-Type': mimeType,
+        'Content-Length': String(bytes.byteLength),
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  } catch (error) {
+    return imageErrorResponse(error);
+  }
+}
+
 function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
   auth ??= createFreebuffAuth({
     clientId: env.FREEBUFF_CLIENT_ID,
@@ -515,6 +691,27 @@ function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
       } catch {
         console.error('AI route failed');
         return jsonError('The AI planning service is unavailable right now.', 500);
+      }
+    }
+    if (url.pathname === '/api/images/jobs') {
+      try {
+        return await handleImageJobCreate(request, requestEnv, authInstance);
+      } catch {
+        console.error('Image create route failed');
+        return jsonError('The image generation service is unavailable right now.', 500);
+      }
+    }
+    const imageMatch = IMAGE_JOB_PATH.exec(url.pathname);
+    if (imageMatch) {
+      const [, id, action] = imageMatch;
+      try {
+        if (action === 'image') {
+          return await handleImageJobImage(request, requestEnv, authInstance, id);
+        }
+        return await handleImageJobGet(request, requestEnv, authInstance, id);
+      } catch {
+        console.error('Image job route failed');
+        return jsonError('The image generation service is unavailable right now.', 500);
       }
     }
     return requestEnv.ASSETS.fetch(request);

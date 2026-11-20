@@ -63,6 +63,18 @@ export async function cleanupProjectMedia(store: ProjectMediaCleanupSource): Pro
 async function cleanupUnreferencedAssets(projects: Project[]): Promise<string[]> {
   const referenced = referencedAssetIds(projects);
   const assets = await listAllAssets();
+  // A replaced image is still reachable from the scene's current image, so its
+  // whole replacement chain has to survive cleanup for undo to work.
+  const byId = new Map(assets.map((asset) => [asset.id, asset]));
+  for (const id of [...referenced]) {
+    let cursor = byId.get(id)?.replacesAssetId ?? null;
+    let guard = 0;
+    while (cursor && !referenced.has(cursor) && guard < 50) {
+      referenced.add(cursor);
+      cursor = byId.get(cursor)?.replacesAssetId ?? null;
+      guard += 1;
+    }
+  }
   const deleted: string[] = [];
   for (const asset of assets) {
     if (referenced.has(asset.id)) continue;

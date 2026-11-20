@@ -11,6 +11,8 @@
     "build:worker": "esbuild worker/index.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=worker/dist/index.js --log-level=warning",
     "build:sites": "npm run build && npm run build:worker",
     "check:route": "npm run build:worker && esbuild scripts/local-route-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/local-route-check.mjs --log-level=warning && node /tmp/local-route-check.mjs",
+    "check:image:route": "npm run build:worker && esbuild scripts/live-image-route-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/live-image-route-check.mjs --log-level=warning && node /tmp/live-image-route-check.mjs",
+    "check:image": "esbuild scripts/live-image-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/live-image-check.mjs --log-level=warning && node /tmp/live-image-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

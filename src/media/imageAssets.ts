@@ -1,6 +1,6 @@
 import { newId } from '../domain/ids';
 import { putAsset } from './mediaDb';
-import type { MediaAssetRecord } from './mediaDb';
+import type { ImageGenerationRecord, MediaAssetRecord } from './mediaDb';
 
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_IMAGE_DIMENSION = 4096;
@@ -90,6 +90,43 @@ export async function storeSceneImage(projectId: string, file: File): Promise<Me
     height: decoded.height,
     createdAt: new Date().toISOString(),
     blob: file,
+    source: 'upload',
+    generation: null,
+    replacesAssetId: null,
+  };
+  await putAsset(record);
+  return record;
+}
+
+/**
+ * A generated image enters the same store, and therefore the same validation
+ * and render path, as an upload. `replacesAssetId` keeps the previous attached
+ * image reachable so a replacement can be undone.
+ */
+export async function storeGeneratedSceneImage(
+  projectId: string,
+  blob: Blob,
+  generation: ImageGenerationRecord,
+  replacesAssetId: string | null,
+): Promise<MediaAssetRecord> {
+  const extension = generation.outputFormat === 'png' ? 'png' : 'jpg';
+  const name = `Generated · ${generation.model.split('/').pop() ?? generation.model}.${extension}`;
+  const file = new File([blob], name, { type: blob.type || 'image/jpeg' });
+  const decoded = await decodeImageFile(file);
+  decoded.bitmap.close();
+  const record: MediaAssetRecord = {
+    id: newId('img'),
+    projectId,
+    name,
+    mimeType: file.type,
+    byteSize: file.size,
+    width: decoded.width,
+    height: decoded.height,
+    createdAt: new Date().toISOString(),
+    blob: file,
+    source: 'generated',
+    generation,
+    replacesAssetId,
   };
   await putAsset(record);
   return record;

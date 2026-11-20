@@ -21,6 +21,25 @@ export interface MediaAssetRecord {
   height: number;
   createdAt: string;
   blob: Blob;
+  /** Absent on records written before generated images existed; those are uploads. */
+  source?: 'upload' | 'generated';
+  generation?: ImageGenerationRecord | null;
+  /** The image this one replaced, kept so a replacement can be undone. */
+  replacesAssetId?: string | null;
+}
+
+/** Provenance recorded with a generated image when it is attached. */
+export interface ImageGenerationRecord {
+  provider: string;
+  model: string;
+  prompt: string;
+  width: number;
+  height: number;
+  outputFormat: 'jpeg' | 'png';
+  style: string;
+  jobId: string;
+  generatedAt: string;
+  inferenceSeconds: number | null;
 }
 
 export interface AudioAssetRecord {

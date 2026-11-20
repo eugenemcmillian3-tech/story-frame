@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { AiStoryboardPlanner } from '../components/AiPlanning';
 import { Dialog } from '../components/Dialog';
 import { SceneImageField } from '../components/SceneImageField';
+import { SceneImageGenerator } from '../components/SceneImageGenerator';
 import { Badge, Panel, SelectField, TextAreaField, TextField } from '../components/ui';
 import {
   ASSET_TYPES,
@@ -123,6 +124,16 @@ export function StoryboardScreen({ project }: { project: Project }) {
       ) : null}
 
       <AiStoryboardPlanner project={project} />
+
+      {scenes.length > 0 ? (
+        <SceneImageGenerator
+          project={project}
+          scenes={scenes}
+          initialSceneId={selected?.id ?? null}
+          onRun={run}
+          onCleanupMedia={cleanupMedia}
+        />
+      ) : null}
 
       {materialVariance ? (
         <div className="review-banner is-stale" role="status">
