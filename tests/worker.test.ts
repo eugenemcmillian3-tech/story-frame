@@ -17,8 +17,11 @@ vi.mock('@freebuff/auth', () => ({
 import worker from '../worker/index';
 
 const APP_ORIGIN = 'https://app.test';
-const DAY_KEY = `d:${new Date().toISOString().slice(0, 10)}`;
-const MINUTE_KEY = `m:${new Date().toISOString().slice(0, 16)}`;
+// The quota windows are derived from the clock at request time. Pin it so a
+// suite that straddles a minute or UTC-day boundary cannot seed yesterday's key.
+const NOW = new Date('2026-01-01T00:00:30.000Z');
+const DAY_KEY = `d:${NOW.toISOString().slice(0, 10)}`;
+const MINUTE_KEY = `m:${NOW.toISOString().slice(0, 16)}`;
 
 const anglesInput = {
   brief: {
@@ -149,6 +152,8 @@ function chatReply(content: string): Response {
 const providerFetch = vi.fn();
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   mocks.getUser.mockReset();
   mocks.getUser.mockResolvedValue({ sub: 'user_1' });
   providerFetch.mockReset();
@@ -157,6 +162,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('POST /api/ai/plan access control', () => {
