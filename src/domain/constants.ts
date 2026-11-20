@@ -81,6 +81,8 @@ export const STAGE_LABELS: Record<Stage, string> = {
 
 export const MAX_SCENES = 200;
 export const MAX_SCRIPT_VERSIONS = 5;
+/** Directed-edit undo history kept per project, newest first. */
+export const MAX_EDIT_HISTORY = 5;
 
 /** Narration word rate used for every runtime estimate shown in the UI. */
 export const NARRATION_WORDS_PER_MINUTE = 150;

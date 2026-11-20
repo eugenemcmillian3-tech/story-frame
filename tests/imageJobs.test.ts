@@ -534,7 +534,9 @@ describe('image routes', () => {
     expect(created.job.status).toBe('completed');
 
     const file = await worker.fetch(
-      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}/image`),
+      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}/image`, {
+        headers: { origin: APP_ORIGIN },
+      }),
       goodEnv as never,
     );
     expect(file.status).toBe(200);
@@ -553,7 +555,9 @@ describe('image routes', () => {
     expect(created.job.status).toBe('queued');
 
     const checked = await worker.fetch(
-      new Request(`${APP_ORIGIN}/api/images/jobs/ij_route_leo_1`),
+      new Request(`${APP_ORIGIN}/api/images/jobs/ij_route_leo_1`, {
+        headers: { origin: APP_ORIGIN },
+      }),
       goodEnv as never,
     );
     const checkedBody = (await checked.json()) as { job: { status: string; provider: string } };
@@ -580,10 +584,69 @@ describe('image routes', () => {
     await created.text();
     mocks.getUser.mockResolvedValue({ sub: 'user_2' });
     const response = await worker.fetch(
-      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}`),
+      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}`, {
+        headers: { origin: APP_ORIGIN },
+      }),
       goodEnv as never,
     );
     expect(response.status).toBe(404);
+  });
+
+  it('rejects a foreign origin on the job and cancel routes before touching the job', async () => {
+    const goodEnv = testEnv();
+    const created = await worker.fetch(postJob(body), goodEnv as never);
+    await created.text();
+    mocks.getUser.mockClear();
+    fetchMock.mockClear();
+
+    const requests = [
+      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}`, {
+        headers: { origin: 'https://evil.test' },
+      }),
+      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}/cancel`, {
+        method: 'POST',
+        headers: { origin: 'https://evil.test' },
+      }),
+    ];
+    for (const request of requests) {
+      const response = await worker.fetch(request, goodEnv as never);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: 'This request did not come from this site.',
+      });
+    }
+    expect(mocks.getUser).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('treats an image-bytes request with no Origin or Sec-Fetch-Site as an auth check', async () => {
+    mocks.getUser.mockResolvedValue(null);
+    const response = await worker.fetch(
+      new Request(`${APP_ORIGIN}/api/images/jobs/ij_direct_12345678/image`),
+      testEnv() as never,
+    );
+    expect(mocks.getUser).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: 'Sign in with Freebuff to download this image.',
+    });
+  });
+
+  it('serves image bytes by session scope rather than origin', async () => {
+    const goodEnv = testEnv();
+    const created = await worker.fetch(postJob(body), goodEnv as never);
+    await created.text();
+
+    const fileRequest = () =>
+      new Request(`${APP_ORIGIN}/api/images/jobs/${body.id}/image`, {
+        headers: { origin: 'https://evil.test' },
+      });
+    const file = await worker.fetch(fileRequest(), goodEnv as never);
+    expect(file.status).toBe(200);
+    expect(file.headers.get('content-type')).toBe('image/jpeg');
+
+    mocks.getUser.mockResolvedValue(null);
+    expect((await worker.fetch(fileRequest(), goodEnv as never)).status).toBe(401);
   });
 
   it('counts one generation against the daily budget', async () => {

@@ -19,6 +19,7 @@ import {
 } from '../src/domain/storyboard';
 import { getStoryboardReview } from '../src/domain/staleness';
 import { isDurationVarianceMaterial, totalPlannedDuration } from '../src/domain/duration';
+import { SCHEMA_VERSION } from '../src/domain/types';
 import type { Project } from '../src/domain/types';
 
 const NOW = '2026-01-01T00:00:00.000Z';
@@ -45,7 +46,7 @@ function withScene(project: Project, duration = 10): { project: Project; sceneId
 describe('project creation', () => {
   it('creates a versioned project with a stable id and no duplicate ids', () => {
     const project = makeProject();
-    expect(project.schemaVersion).toBe(4);
+    expect(project.schemaVersion).toBe(SCHEMA_VERSION);
     expect(project.id).toBe('prj_test');
     expect(project.brief.targetDuration).toBe(45);
     expect(project.script.narration).toBe('');

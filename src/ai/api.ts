@@ -1,12 +1,19 @@
-import { parseAngleTokens, parseScriptTokens, parseStoryboardTokens } from './contracts';
-import type { ScriptTokens, StoryboardTokens } from './contracts';
+import { parseAngleTokens, parseEditTokens, parseScriptTokens, parseStoryboardTokens } from './contracts';
+import type { EditTokens, ScriptTokens, StoryboardTokens } from './contracts';
 import {
   buildAnglesInput,
+  buildEditInput,
   buildScriptInput,
   buildStoryboardInput,
   requestFingerprint,
 } from './input';
-import type { AiRequestPayload, AnglesInput, ScriptInput, StoryboardInput } from './input';
+import type {
+  AiRequestPayload,
+  AnglesInput,
+  EditInput,
+  ScriptInput,
+  StoryboardInput,
+} from './input';
 import { DEFAULT_AI_MODEL } from './models';
 import type { AiModelId } from './models';
 import { AiError } from './types';
@@ -176,6 +183,17 @@ export async function requestScript(
     }),
     inputFingerprint: fingerprint,
   };
+}
+
+export async function requestEditPlan(
+  project: Project,
+  request: string,
+  model: AiModelId = DEFAULT_AI_MODEL,
+  signal: AbortSignal,
+): Promise<{ tokens: EditTokens; inputFingerprint: string }> {
+  const input: EditInput = buildEditInput(project, request);
+  const { response, fingerprint } = await post({ operation: 'edit', model, input }, signal);
+  return { tokens: parseEditTokens(response.proposal), inputFingerprint: fingerprint };
 }
 
 export async function requestStoryboard(

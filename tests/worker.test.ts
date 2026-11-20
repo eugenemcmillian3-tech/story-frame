@@ -113,10 +113,6 @@ function fakeDb(seed: Array<[string, string, number]> = []) {
       };
       return statement;
     },
-    async batch(statements: FakeStatement[]) {
-      for (const statement of statements) await statement.run();
-      return [];
-    },
   };
 }
 
@@ -270,7 +266,7 @@ describe('POST /api/ai/plan quotas', () => {
     expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(1);
   });
 
-  it('stops at the minute limit when two requests arrive together', async () => {
+  it('refuses the request that would exceed the minute limit', async () => {
     const db = fakeDb([['user_1', MINUTE_KEY, 5]]);
     providerFetch.mockResolvedValue(chatReply(JSON.stringify(anglesProposal)));
     const first = await worker.fetch(post(payload), testEnv(db) as never);
@@ -290,8 +286,111 @@ describe('POST /api/ai/plan quotas', () => {
   });
 });
 
+describe('POST /api/ai/plan directed edit', () => {
+  const editInput = {
+    brief: anglesInput.brief,
+    request: 'Replace the first scene visual only',
+    script: { narration: 'Opening line.', locked: false },
+    scenes: [
+      {
+        id: 'scn_1',
+        title: 'Opening',
+        narration: 'Opening line.',
+        visualDirection: '',
+        onScreenText: '',
+        plannedDuration: 10,
+        status: 'draft' as const,
+        locks: { narration: false, visuals: false, text: false, timing: false },
+      },
+    ],
+  };
+  const editPayload = { operation: 'edit' as const, model: DEFAULT_AI_MODEL, input: editInput };
+
+  it('returns the allowlisted commands the provider proposed', async () => {
+    providerFetch.mockResolvedValue(
+      chatReply(
+        JSON.stringify({
+          commands: [
+            { kind: 'scene.visual', sceneId: 'scn_1', visualDirection: 'A slow push in' },
+          ],
+          explanation: 'One visual change.',
+          alternatives: [],
+        }),
+      ),
+    );
+    const response = await worker.fetch(post(editPayload), testEnv() as never);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      operation: string;
+      proposal: { commands: unknown[]; explanation: string };
+    };
+    expect(body.operation).toBe('edit');
+    expect(body.proposal.commands).toEqual([
+      { kind: 'scene.visual', sceneId: 'scn_1', visualDirection: 'A slow push in' },
+    ]);
+    expect(body.proposal.explanation).toBe('One visual change.');
+  });
+
+  it('returns the provider-named blocked target alongside an empty command list', async () => {
+    providerFetch.mockResolvedValue(
+      chatReply(
+        JSON.stringify({
+          commands: [],
+          explanation: 'The scene visual is locked.',
+          alternatives: ['Unlock visuals on scene 1.'],
+          blocked: [{ sceneId: 'scn_1', component: 'visuals' }],
+          blockedScript: true,
+        }),
+      ),
+    );
+    const response = await worker.fetch(post(editPayload), testEnv() as never);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      proposal: { commands: unknown[]; blocked: unknown[]; blockedScript: boolean };
+    };
+    expect(body.proposal.commands).toEqual([]);
+    expect(body.proposal.blocked).toEqual([{ sceneId: 'scn_1', component: 'visuals' }]);
+    expect(body.proposal.blockedScript).toBe(true);
+  });
+
+  it('refuses a blocked target whose component is not a scene component', async () => {
+    providerFetch.mockResolvedValue(
+      chatReply(
+        JSON.stringify({
+          commands: [],
+          blocked: [{ sceneId: 'scn_1', component: 'script' }],
+        }),
+      ),
+    );
+    const response = await worker.fetch(post(editPayload), testEnv() as never);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain('unreadable response');
+  });
+
+  it('refuses a response that adds a field outside the allowlist', async () => {
+    providerFetch.mockResolvedValue(
+      chatReply(
+        JSON.stringify({
+          commands: [
+            {
+              kind: 'scene.visual',
+              sceneId: 'scn_1',
+              visualDirection: 'A slow push in',
+              plannedDuration: 99,
+            },
+          ],
+        }),
+      ),
+    );
+    const response = await worker.fetch(post(editPayload), testEnv() as never);
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain('unreadable response');
+  });
+});
+
 describe('GET /api/ai/quota', () => {
-  const get = () => new Request(`${APP_ORIGIN}/api/ai/quota`);
+  const get = () =>
+    new Request(`${APP_ORIGIN}/api/ai/quota`, { headers: { Origin: APP_ORIGIN } });
 
   it('reports what is left without consuming any of it', async () => {
     const db = fakeDb([
@@ -328,6 +427,56 @@ describe('GET /api/ai/quota', () => {
     );
     expect(wrongMethod.status).toBe(405);
     expect(wrongMethod.headers.get('allow')).toBe('GET');
+  });
+
+  it('rejects a foreign origin before reading usage', async () => {
+    const db = fakeDb([['user_1', DAY_KEY, 4]]);
+    const response = await worker.fetch(
+      new Request(`${APP_ORIGIN}/api/ai/quota`, {
+        headers: { Origin: 'https://evil.example' },
+      }),
+      testEnv(db) as never,
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({
+      error: 'This request did not come from this site.',
+    });
+    expect(mocks.getUser).not.toHaveBeenCalled();
+    expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(4);
+  });
+});
+
+describe('narration route access control', () => {
+  it('rejects a foreign origin before sign-in on both narration routes', async () => {
+    const requests = [
+      new Request(`${APP_ORIGIN}/api/narration/jobs`, {
+        method: 'POST',
+        headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
+        body: '{}',
+      }),
+      new Request(`${APP_ORIGIN}/api/narration/usage`, {
+        headers: { origin: 'https://evil.example' },
+      }),
+    ];
+    for (const request of requests) {
+      const response = await worker.fetch(request, testEnv() as never);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: 'This request did not come from this site.',
+      });
+    }
+    expect(mocks.getUser).not.toHaveBeenCalled();
+  });
+
+  it('requires sign-in on a same-origin narration usage read', async () => {
+    mocks.getUser.mockResolvedValue(null);
+    const response = await worker.fetch(
+      new Request(`${APP_ORIGIN}/api/narration/usage`, {
+        headers: { Origin: APP_ORIGIN },
+      }),
+      testEnv() as never,
+    );
+    expect(response.status).toBe(401);
   });
 });
 

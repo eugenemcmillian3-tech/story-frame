@@ -7,7 +7,7 @@ import type { AngleProposal, ProjectProposals, StoryboardProposal } from './type
  */
 export function rotateAngles(
   proposals: ProjectProposals,
-  next: AngleProposal | null,
+  next: AngleProposal,
 ): ProjectProposals {
   return {
     ...proposals,
@@ -18,7 +18,7 @@ export function rotateAngles(
 
 export function rotateStoryboard(
   proposals: ProjectProposals,
-  next: StoryboardProposal | null,
+  next: StoryboardProposal,
 ): ProjectProposals {
   return {
     ...proposals,

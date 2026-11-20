@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AiStoryboardPlanner } from '../components/AiPlanning';
+import { DirectedEditing } from '../components/DirectedEditing';
 import { Dialog } from '../components/Dialog';
 import { MissingMediaNotice } from '../components/MissingMediaNotice';
 import { SceneImageField } from '../components/SceneImageField';
@@ -125,6 +126,8 @@ export function StoryboardScreen({ project }: { project: Project }) {
       ) : null}
 
       <MissingMediaNotice project={project} />
+
+      <DirectedEditing project={project} />
 
       <AiStoryboardPlanner project={project} />
 

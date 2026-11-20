@@ -56,6 +56,25 @@ function narration(id: string, voice: string, replacesAssetId: string | null): A
   };
 }
 
+/** An uploaded track, written exactly as the audio panel stores one over narration. */
+function upload(id: string, replacesAssetId: string): AudioAssetRecord {
+  return {
+    id,
+    projectId: PROJECT_ID,
+    name: 'upload-take.wav',
+    mimeType: 'audio/wav',
+    byteSize: 192_044,
+    durationMs: 2000,
+    sampleRate: 48_000,
+    channels: 1,
+    createdAt: NOW,
+    blob: {} as Blob,
+    source: 'upload',
+    generation: null,
+    replacesAssetId,
+  };
+}
+
 function project(): Project {
   return createProject(
     { title: 'Restored narration', mode: 'factual', targetDuration: 60, visualPreset: 'clean-educational' },
@@ -127,5 +146,31 @@ describe('restored narration cleanup', () => {
     expect(deleted).toEqual([]);
     expect(media.audio.has(newer.id)).toBe(true);
     expect(media.audio.has(older.id)).toBe(true);
+  });
+});
+
+describe('upload over generated narration cleanup', () => {
+  it('keeps the generated take an upload replaced', async () => {
+    const generated = narration('aud_generated', 'angus', null);
+    const replaced = upload('aud_upload', generated.id);
+    const stray = narration('aud_stray', 'luna', null);
+    for (const asset of [generated, replaced, stray]) await putAudioAsset(asset);
+
+    const deleted = await cleanupProjectMedia(storeFor(attached(project(), replaced)));
+
+    // The upload carries no generation of its own, so only its link keeps the take.
+    expect(deleted).toEqual(['aud_stray']);
+  });
+
+  it('keeps both records again after switching back to the generated take', async () => {
+    const generated = narration('aud_generated', 'angus', null);
+    const replaced = upload('aud_upload', generated.id);
+    for (const asset of [generated, replaced]) await putAudioAsset(asset);
+
+    // Restoring links the generated take to the upload it displaced, the
+    // opposite direction from the upload's own link.
+    await linkAudioAssetReplacement(generated.id, replaced.id);
+
+    expect(await cleanupProjectMedia(storeFor(attached(project(), generated)))).toEqual([]);
   });
 });

@@ -3,6 +3,7 @@ export type DomainErrorCode =
   | 'scene-locked'
   | 'scene-not-found'
   | 'script-version-not-found'
+  | 'stale-plan'
   | 'invalid-value';
 
 export class DomainError extends Error {

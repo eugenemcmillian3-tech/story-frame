@@ -99,6 +99,7 @@ export function createProject(
     planningNotes: [],
     storyboard: { scenes: [], reviewedScriptFingerprint: null, reviewedAt: null, previous: null },
     workflow: { lastStage: 'brief' },
+    editHistory: [],
   };
 }
 
@@ -132,6 +133,8 @@ export function duplicateProject(
       music: { ...project.audio.music },
     },
     planningNotes: project.planningNotes.map((note) => ({ ...note, id: newId('note') })),
+    // A copy starts with no undo history: its scenes and assets are new.
+    editHistory: [],
     storyboard: {
       ...project.storyboard,
       scenes: project.storyboard.scenes.map((scene) => ({

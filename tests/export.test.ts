@@ -7,6 +7,7 @@ import {
   serializeProjectDataExport,
 } from '../src/domain/exportData';
 import { createProject } from '../src/domain/project';
+import { SCHEMA_VERSION } from '../src/domain/types';
 import { parseProjectJson } from '../src/domain/validation';
 
 const project = createProject({
@@ -24,7 +25,7 @@ describe('project data export', () => {
 
     const exported = buildProjectDataExport(project, '2026-01-01T00:00:00.000Z');
     expect(exported.exportKind).toBe('project-data');
-    expect(exported.schemaVersion).toBe(4);
+    expect(exported.schemaVersion).toBe(SCHEMA_VERSION);
     expect(exported.disclaimer).toBe(PROJECT_DATA_DISCLAIMER);
     expect(exported.disclaimer).toMatch(/not a media backup/i);
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createProject, updateAudioTrack } from '../src/domain/project';
 import { addScene, updateScene } from '../src/domain/storyboard';
 import { parseProjectJson } from '../src/domain/validation';
+import { SCHEMA_VERSION } from '../src/domain/types';
 import type { Project } from '../src/domain/types';
 import { referencedAssetIds, referencedAudioAssetIds } from '../src/media/cleanup';
 import { MAX_AUDIO_BYTES, validateAudioFileMeta } from '../src/media/audioAssets';
@@ -349,7 +350,7 @@ describe('schema 1 compatibility', () => {
     const parsed = parseProjectJson(raw);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.value.schemaVersion).toBe(4);
+    expect(parsed.value.schemaVersion).toBe(SCHEMA_VERSION);
     expect(parsed.value.storyboard.scenes[0]?.imageAssetId).toBeNull();
     expect(parsed.value.storyboard.scenes[0]?.imageFraming).toBe('fit');
     expect(parsed.value.storyboard.scenes[1]?.imageFraming).toBe('fit');

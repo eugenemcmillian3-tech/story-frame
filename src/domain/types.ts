@@ -4,7 +4,7 @@
  * Persisted project data is versioned with SCHEMA_VERSION. Bump the version
  * whenever the stored shape changes, and teach the validator about it.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export type ProjectMode = 'factual' | 'fiction';
 export type TargetDuration = 30 | 45 | 60 | 90;
@@ -15,6 +15,12 @@ export type AssetType = 'image' | 'video-clip' | 'diagram' | 'title-card' | 'b-r
 export type SceneLockKey = 'narration' | 'visuals' | 'text' | 'timing';
 /** How an uploaded still frame fills the vertical frame. */
 export type ImageFraming = 'fit' | 'fill';
+
+/** A locked scene component a provider named when it proposed no command. */
+export interface EditBlockedTarget {
+  sceneId: string;
+  component: SceneLockKey;
+}
 
 /** Independent, per-component locks on a single scene. */
 export interface SceneLocks {
@@ -190,6 +196,62 @@ export interface Workflow {
   lastStage: Stage;
 }
 
+/** One allowlisted directed-edit command. Nothing else can be written by a plan. */
+export type EditCommandKind = 'script.replace' | 'scene.visual' | 'scene.text' | 'scene.duration';
+
+export interface ScriptReplaceCommand {
+  kind: 'script.replace';
+  /** Which part of the script the fragment replaces. */
+  scope: 'all' | 'opening' | 'ending';
+  /** Replacement narration. For 'all' this is the whole script. */
+  text: string;
+  /** Exact adjacent script text kept unchanged. Empty only for scope 'all'. */
+  boundary: string;
+}
+
+export interface SceneVisualCommand {
+  kind: 'scene.visual';
+  sceneId: string;
+  visualDirection: string;
+}
+
+export interface SceneTextCommand {
+  kind: 'scene.text';
+  sceneId: string;
+  onScreenText: string;
+}
+
+export interface SceneDurationCommand {
+  kind: 'scene.duration';
+  sceneId: string;
+  plannedDuration: number;
+}
+
+export type EditCommand =
+  | ScriptReplaceCommand
+  | SceneVisualCommand
+  | SceneTextCommand
+  | SceneDurationCommand;
+
+/** Project components one edit changed, kept so the edit can be undone. */
+export interface EditSnapshot {
+  scriptNarration: string;
+  scenes: Scene[];
+  audio: ProjectAudio;
+  reviewedScriptFingerprint: string | null;
+  reviewedAt: string | null;
+}
+
+/** A bounded, user-visible record of one applied directed edit. */
+export interface EditRecord {
+  id: string;
+  /** The user's request, truncated for storage. */
+  request: string;
+  commands: EditCommandKind[];
+  appliedAt: string;
+  before: EditSnapshot;
+}
+
 export interface Project {
   schemaVersion: number;
   id: string;
@@ -208,4 +270,6 @@ export interface Project {
   planningNotes: PlanningNote[];
   storyboard: Storyboard;
   workflow: Workflow;
+  /** Newest first, bounded by MAX_EDIT_HISTORY. Referenced assets stay alive. */
+  editHistory: EditRecord[];
 }

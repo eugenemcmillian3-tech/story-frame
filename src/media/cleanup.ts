@@ -1,11 +1,19 @@
 import type { Project } from '../domain/types';
 import { deleteAsset, deleteAudioAsset, listAllAssets, listAllAudioAssets } from './mediaDb';
 
-/** Every image asset id still referenced by a scene in any readable project. */
-export function referencedAssetIds(projects: Array<Pick<Project, 'storyboard'>>): Set<string> {
+/**
+ * Every image asset id still reachable: the live board, the previous board, and
+ * the scenes kept by directed-edit undo history. Undo restores an image id from
+ * its snapshot, so deleting that image would make the undo restore a missing file.
+ */
+export function referencedAssetIds(projects: Array<Pick<Project, 'storyboard' | 'editHistory'>>): Set<string> {
   const referenced = new Set<string>();
   for (const project of projects) {
-    const boards = [project.storyboard.scenes, project.storyboard.previous?.scenes ?? []];
+    const boards = [
+      project.storyboard.scenes,
+      project.storyboard.previous?.scenes ?? [],
+      ...project.editHistory.map((entry) => entry.before.scenes),
+    ];
     for (const scenes of boards) {
       for (const scene of scenes) {
         if (scene.imageAssetId) referenced.add(scene.imageAssetId);
@@ -15,12 +23,19 @@ export function referencedAssetIds(projects: Array<Pick<Project, 'storyboard'>>)
   return referenced;
 }
 
-/** Every uploaded narration or music asset still referenced by any project. */
-export function referencedAudioAssetIds(projects: Array<Pick<Project, 'audio'>>): Set<string> {
+/** Every narration or music asset a project still references, undo snapshots included. */
+export function referencedAudioAssetIds(
+  projects: Array<Pick<Project, 'audio' | 'editHistory'>>,
+): Set<string> {
   const referenced = new Set<string>();
   for (const project of projects) {
     for (const track of [project.audio.narration, project.audio.music]) {
       if (track.assetId) referenced.add(track.assetId);
+    }
+    for (const entry of project.editHistory) {
+      for (const track of [entry.before.audio.narration, entry.before.audio.music]) {
+        if (track.assetId) referenced.add(track.assetId);
+      }
     }
   }
   return referenced;

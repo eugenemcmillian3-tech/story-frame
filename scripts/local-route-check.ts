@@ -180,10 +180,6 @@ function fakeDb() {
       };
       return statement;
     },
-    async batch(statements: Array<{ run(): Promise<unknown> }>) {
-      for (const statement of statements) await statement.run();
-      return [];
-    },
   };
 }
 

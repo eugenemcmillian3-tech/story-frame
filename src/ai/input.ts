@@ -9,7 +9,7 @@ import type {
   AiStoryNotesInput,
   AiOperation,
 } from './types';
-import type { Project } from '../domain/types';
+import type { Project, SceneLockKey } from '../domain/types';
 
 export interface AnglesInput {
   brief: AiBriefInput;
@@ -26,10 +26,30 @@ export interface StoryboardInput {
   script: { narration: string; fingerprint: string };
 }
 
+/** One scene as directed editing sees it: ids, editable components, and locks. */
+export interface EditSceneInput {
+  id: string;
+  title: string;
+  narration: string;
+  visualDirection: string;
+  onScreenText: string;
+  plannedDuration: number;
+  status: 'draft' | 'approved';
+  locks: { narration: boolean; visuals: boolean; text: boolean; timing: boolean };
+}
+
+export interface EditInput {
+  brief: AiBriefInput;
+  request: string;
+  script: { narration: string; locked: boolean };
+  scenes: EditSceneInput[];
+}
+
 export type AiRequestPayload =
   | { operation: 'angles'; model: AiModelId; input: AnglesInput }
   | { operation: 'script'; model: AiModelId; input: ScriptInput }
-  | { operation: 'storyboard'; model: AiModelId; input: StoryboardInput };
+  | { operation: 'storyboard'; model: AiModelId; input: StoryboardInput }
+  | { operation: 'edit'; model: AiModelId; input: EditInput };
 
 /** Deterministic stringify so the client and Worker fingerprint identical input. */
 export function stableStringify(value: unknown): string {
@@ -104,6 +124,32 @@ export function buildStoryboardInput(project: Project): StoryboardInput {
       fingerprint: project.script.fingerprint,
     },
   };
+}
+
+export function buildEditInput(project: Project, request: string): EditInput {
+  return {
+    brief: briefInput(project),
+    request: request.trim().slice(0, 400),
+    script: { narration: project.script.narration, locked: project.script.locked },
+    scenes: project.storyboard.scenes.map((scene) => ({
+      id: scene.id,
+      title: scene.title,
+      narration: scene.narration,
+      visualDirection: scene.visualDirection,
+      onScreenText: scene.onScreenText,
+      plannedDuration: scene.plannedDuration,
+      status: scene.status,
+      locks: { ...scene.locks },
+    })),
+  };
+}
+
+export function editInputFingerprint(
+  project: Project,
+  request: string,
+  model: AiModelId = DEFAULT_AI_MODEL,
+): string {
+  return fingerprintPlanningInput('edit', buildEditInput(project, request), model);
 }
 
 export function angleInputFingerprint(
@@ -256,6 +302,60 @@ export function parseAiRequest(value: unknown): AiRequestPayload {
       input: { ...base.input, angle: readAngle(recordValue.angle) },
     };
   }
+  if (operation === 'edit') {
+    const recordValue = record(root.input, 'input');
+    const brief = readBrief(recordValue.brief);
+    const request = text(recordValue, 'request', 'input.request', 400);
+    const script = record(recordValue.script, 'input.script');
+    const narration = text(script, 'narration', 'input.script.narration', 40_000, false);
+    const locked = script.locked;
+    if (typeof locked !== 'boolean') throw invalid('input.script.locked must be true or false.');
+    if (!Array.isArray(recordValue.scenes)) throw invalid('input.scenes must be a list.');
+    if (recordValue.scenes.length > 200) throw invalid('input.scenes has too many items.');
+    const ids = new Set<string>();
+    const scenes = recordValue.scenes.map((item, index) => {
+      const path = `input.scenes[${index}]`;
+      const scene = record(item, path);
+      const id = text(scene, 'id', `${path}.id`, 200);
+      if (ids.has(id)) throw invalid('input.scenes contains duplicate scene IDs.');
+      ids.add(id);
+      const status = scene.status;
+      if (status !== 'draft' && status !== 'approved') {
+        throw invalid(`${path}.status is invalid.`);
+      }
+      const locks = record(scene.locks, `${path}.locks`);
+      const readLock = (key: SceneLockKey): boolean => {
+        const value = locks[key];
+        if (typeof value !== 'boolean') throw invalid(`${path}.locks.${key} must be true or false.`);
+        return value;
+      };
+      const plannedDuration = scene.plannedDuration;
+      if (
+        typeof plannedDuration !== 'number' ||
+        !Number.isFinite(plannedDuration) ||
+        plannedDuration < 0 ||
+        plannedDuration > 600
+      ) {
+        throw invalid(`${path}.plannedDuration must be between 0 and 600 seconds.`);
+      }
+      return {
+        id,
+        title: text(scene, 'title', `${path}.title`, 200, false),
+        narration: text(scene, 'narration', `${path}.narration`, 8000, false),
+        visualDirection: text(scene, 'visualDirection', `${path}.visualDirection`, 4000, false),
+        onScreenText: text(scene, 'onScreenText', `${path}.onScreenText`, 500, false),
+        plannedDuration,
+        status: status as 'draft' | 'approved',
+        locks: {
+          narration: readLock('narration'),
+          visuals: readLock('visuals'),
+          text: readLock('text'),
+          timing: readLock('timing'),
+        },
+      };
+    });
+    return { operation, model, input: { brief, request, script: { narration, locked }, scenes } };
+  }
   if (operation === 'storyboard') {
     const recordValue = record(root.input, 'input');
     const brief = readBrief(recordValue.brief);
@@ -267,7 +367,7 @@ export function parseAiRequest(value: unknown): AiRequestPayload {
     }
     return { operation, model, input: { brief, script: { narration, fingerprint } } };
   }
-  throw invalid('operation must be angles, script, or storyboard.');
+  throw invalid('operation must be angles, script, storyboard, or edit.');
 }
 
 export function requestFingerprint(payload: AiRequestPayload): string {

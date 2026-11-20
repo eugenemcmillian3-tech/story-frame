@@ -18,13 +18,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function previousAnglesDraft(value: unknown): AngleProposal | null {
-  if (!isRecord(value) || !Array.isArray(value.angles)) return null;
+function readAngleProposal(value: unknown): AngleProposal | null {
+  if (!isRecord(value)) return null;
+  if (value.status !== 'draft' && value.status !== 'discarded') return null;
+  if (typeof value.inputFingerprint !== 'string') return null;
+  if (!Array.isArray(value.angles) || value.angles.length !== 3) return null;
   return { ...value, model: storedModel(value) } as AngleProposal;
 }
 
-function previousStoryboardDraft(value: unknown): StoryboardProposal | null {
-  if (!isRecord(value) || !Array.isArray(value.scenes)) return null;
+function readStoryboardProposal(value: unknown): StoryboardProposal | null {
+  if (!isRecord(value)) return null;
+  if (!['draft', 'accepted', 'discarded'].includes(String(value.status))) return null;
+  if (typeof value.inputFingerprint !== 'string') return null;
+  if (!Array.isArray(value.scenes)) return null;
   return { ...value, model: storedModel(value) } as StoryboardProposal;
 }
 
@@ -32,17 +38,8 @@ function highLevelShape(value: unknown, projectId: string): ProjectProposals | n
   if (!isRecord(value)) return null;
   if (value.version !== 1 || value.projectId !== projectId) return null;
   if (typeof value.updatedAt !== 'string') return null;
-  const angles = value.angles;
-  if (
-    angles !== null &&
-    (!isRecord(angles) ||
-      (angles.status !== 'draft' && angles.status !== 'discarded') ||
-      typeof angles.inputFingerprint !== 'string' ||
-      !Array.isArray(angles.angles) ||
-      angles.angles.length !== 3)
-  ) {
-    return null;
-  }
+  const angles = value.angles === null ? null : readAngleProposal(value.angles);
+  if (value.angles !== null && angles === null) return null;
   const script = value.script;
   if (
     script !== null &&
@@ -56,28 +53,17 @@ function highLevelShape(value: unknown, projectId: string): ProjectProposals | n
   ) {
     return null;
   }
-  const storyboard = value.storyboard;
-  if (
-    storyboard !== null &&
-    (!isRecord(storyboard) ||
-      !['draft', 'accepted', 'discarded'].includes(String(storyboard.status)) ||
-      typeof storyboard.inputFingerprint !== 'string' ||
-      !Array.isArray(storyboard.scenes))
-  ) {
-    return null;
-  }
+  const storyboard = value.storyboard === null ? null : readStoryboardProposal(value.storyboard);
+  if (value.storyboard !== null && storyboard === null) return null;
   return {
     version: 1,
     projectId,
     updatedAt: value.updatedAt,
-    angles: angles === null ? null : { ...angles, model: storedModel(angles) } as ProjectProposals['angles'],
+    angles,
     script: script === null ? null : { ...script, model: storedModel(script) } as ProjectProposals['script'],
-    storyboard:
-      storyboard === null
-        ? null
-        : ({ ...storyboard, model: storedModel(storyboard) } as ProjectProposals['storyboard']),
-    previousAngles: previousAnglesDraft(value.previousAngles),
-    previousStoryboard: previousStoryboardDraft(value.previousStoryboard),
+    storyboard,
+    previousAngles: readAngleProposal(value.previousAngles),
+    previousStoryboard: readStoryboardProposal(value.previousStoryboard),
   };
 }
 

@@ -8,7 +8,9 @@ export type IdPrefix =
   | 'aud'
   | 'rnd'
   | 'note'
-  | 'nar';
+  | 'nar'
+  | 'edit'
+  | 'plan';
 
 let fallbackCounter = 0;
 

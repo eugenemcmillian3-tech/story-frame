@@ -1,4 +1,4 @@
-import { MAX_SCENES, MAX_SCRIPT_VERSIONS } from './constants';
+import { MAX_EDIT_HISTORY, MAX_SCENES, MAX_SCRIPT_VERSIONS } from './constants';
 import { computeScriptFingerprint } from './fingerprint';
 import { SCHEMA_VERSION } from './types';
 import type {
@@ -6,6 +6,9 @@ import type {
   AssetType,
   AudioTrackSettings,
   Brief,
+  EditCommandKind,
+  EditRecord,
+  EditSnapshot,
   ImageFraming,
   NarrationTake,
   PlanningBudget,
@@ -385,6 +388,63 @@ function readStoryboard(reader: Reader, source: unknown): Storyboard {
   };
 }
 
+const EDIT_COMMAND_KINDS: readonly EditCommandKind[] = [
+  'script.replace',
+  'scene.visual',
+  'scene.text',
+  'scene.duration',
+];
+
+const SCRIPT_SCOPES = ['all', 'opening', 'ending'] as const;
+
+function readEditSnapshot(reader: Reader, source: unknown): EditSnapshot {
+  const record = reader.record(source, 'editHistory[].before');
+  return {
+    scriptNarration: reader.string(record, 'scriptNarration', 'editHistory[].before.scriptNarration', 40000),
+    scenes: reader
+      .array(record, 'scenes', 'editHistory[].before.scenes', MAX_SCENES)
+      .map((item, index) => readScene(reader, item, index, 'editHistory[].before')),
+    audio: readProjectAudio(reader, record.audio),
+    reviewedScriptFingerprint: reader.nullableString(
+      record,
+      'reviewedScriptFingerprint',
+      'editHistory[].before.reviewedScriptFingerprint',
+      200,
+    ),
+    reviewedAt: reader.nullableString(record, 'reviewedAt', 'editHistory[].before.reviewedAt', 64),
+  };
+}
+
+function readEditHistory(reader: Reader, source: unknown): EditRecord[] {
+  if (source === undefined || source === null) return [];
+  const list = reader.array({ editHistory: source }, 'editHistory', 'editHistory', MAX_EDIT_HISTORY);
+  return list.map((item, index) => {
+    const path = `editHistory[${index}]`;
+    const record = reader.record(item, path);
+    return {
+      id: reader.string(record, 'id', `${path}.id`, 200),
+      request: reader.string(record, 'request', `${path}.request`, 400),
+      commands: reader
+        .array(record, 'commands', `${path}.commands`, 20)
+        .map((kind, kindIndex) =>
+          typeof kind === 'string' && (EDIT_COMMAND_KINDS as readonly string[]).includes(kind)
+            ? (kind as EditCommandKind)
+            : (() => {
+                reader.enumValue(
+                  { kind },
+                  'kind',
+                  `${path}.commands[${kindIndex}]`,
+                  EDIT_COMMAND_KINDS,
+                );
+                return 'scene.text' as EditCommandKind;
+              })(),
+        ),
+      appliedAt: reader.string(record, 'appliedAt', `${path}.appliedAt`, 64),
+      before: readEditSnapshot(reader, record.before),
+    };
+  });
+}
+
 function readPlanningNotes(reader: Reader, source: unknown): PlanningNote[] {
   if (source === null || source === undefined) return [];
   const list = reader.array({ planningNotes: source }, 'planningNotes', 'planningNotes', 20);
@@ -421,11 +481,12 @@ export function parseProjectJson(raw: unknown): ParseResult<Project> {
     raw.schemaVersion !== 1 &&
     raw.schemaVersion !== 2 &&
     raw.schemaVersion !== 3 &&
+    raw.schemaVersion !== 4 &&
     raw.schemaVersion !== SCHEMA_VERSION
   ) {
     if (typeof raw.schemaVersion === 'number' && raw.schemaVersion > SCHEMA_VERSION) {
       return parseFailure([
-        `Unsupported schema version ${raw.schemaVersion}: this build reads schema versions 1, 2, 3, and ${SCHEMA_VERSION}.`,
+        `Unsupported schema version ${raw.schemaVersion}: this build reads schema versions 1, 2, 3, 4, and ${SCHEMA_VERSION}.`,
       ]);
     }
     return parseFailure([
@@ -472,6 +533,7 @@ export function parseProjectJson(raw: unknown): ParseResult<Project> {
     workflow: {
       lastStage: reader.enumValue(workflowRecord, 'lastStage', 'workflow.lastStage', STAGES),
     },
+    editHistory: readEditHistory(reader, raw.editHistory),
   };
 
   if (reader.errors.length > 0) return parseFailure(reader.errors);

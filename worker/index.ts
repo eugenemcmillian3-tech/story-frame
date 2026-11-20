@@ -1,6 +1,11 @@
 import { createFreebuffAuth, isSameOriginRequest } from '@freebuff/auth';
 import type { FreebuffAuth } from '@freebuff/auth';
-import { parseAngleTokens, parseScriptTokens, parseStoryboardTokens } from '../src/ai/contracts';
+import {
+  parseAngleTokens,
+  parseEditTokens,
+  parseScriptTokens,
+  parseStoryboardTokens,
+} from '../src/ai/contracts';
 import { parseAiRequest, requestFingerprint } from '../src/ai/input';
 import type { AiRequestPayload } from '../src/ai/input';
 import { AiError } from '../src/ai/types';
@@ -64,6 +69,7 @@ const MAX_TOKENS: Record<AiOperation, number> = {
   angles: 1600,
   script: 4000,
   storyboard: 4000,
+  edit: 3000,
 };
 
 let auth: FreebuffAuth | undefined;
@@ -133,6 +139,22 @@ FICTION MODE RULES:
 - Always return mode "script" with ordered segments.
 All segment text must be original narration for this project. Warnings must describe real uncertainties.`;
   }
+  if (operation === 'edit') {
+    return `${common}
+Turn one directed change request into allowlisted commands. JSON shape:
+{"commands":[{"kind":"script.replace","scope":"opening|ending|all","text":"replacement narration","boundary":"exact adjacent script text kept unchanged"}],"explanation":"one sentence","alternatives":[],"blocked":[{"sceneId":"<id from the input>","component":"visuals|text|timing|narration"}],"blockedScript":false}
+The only allowed commands and their only fields:
+- script.replace with kind, scope, text, boundary. scope "all" replaces the whole script and uses boundary "". scope "opening" or "ending" replaces one end and must quote the exact adjacent script text that stays unchanged in boundary.
+- scene.visual with kind, sceneId, visualDirection.
+- scene.text with kind, sceneId, onScreenText.
+- scene.duration with kind, sceneId, plannedDuration (integer 1-600).
+Rules:
+- Copy sceneId exactly from the supplied scenes. Never invent or rename a scene id.
+- Never include a field that the command does not list. No markdown, no extra keys, no prose outside the JSON.
+- Change only what the request asks for. For script.replace, copy the preserved part into boundary verbatim, so the app can verify it.
+- Respect locks: never propose a command for a locked component. If that leaves no command, set "commands":[] and name each refused scene target in "blocked" with its sceneId copied from the input and one class of component. If the script itself is what blocked the request, set "blockedScript":true instead of a scene entry. Never return commands together with blocked or blockedScript: a refusal means the command list is empty. Omit both fields when nothing was refused, and never invent a scene id.
+- If the request cannot be done with these commands, return {"commands":[]} with a short explanation and concrete alternatives.`;
+  }
   return `${common}
 Turn the saved script into storyboard scenes. JSON shape:
 {"scenes":[{"title":"...","narration":"...","visualDirection":"...","assetType":"image|video-clip|diagram|title-card|b-roll","onScreenText":"...","plannedDuration":10}],"warnings":[]}
@@ -149,6 +171,9 @@ function repairGuidance(operation: AiOperation, input: unknown): string {
   if (operation === 'angles') return `${shaped} Return exactly three angles.`;
   if (operation === 'script') {
     return `${shaped} Every claim needs an "excerpts" array of {sourceId, excerpt} objects, and each excerpt must be copied verbatim from the supplied sources.`;
+  }
+  if (operation === 'edit') {
+    return `${shaped} Return only allowlisted commands with exactly their listed fields, copying sceneId values and the unchanged script text verbatim from the input, and name a refused locked target in "blocked" with its sceneId and component.`;
   }
   const saved = (input as { script?: { narration?: unknown } }).script?.narration;
   const exact =
@@ -453,6 +478,7 @@ async function consumeQuota(db: D1Database, sub: string): Promise<void> {
 }
 
 function normalizeProposal(payload: AiRequestPayload, raw: unknown): unknown {
+  if (payload.operation === 'edit') return parseEditTokens(raw);
   if (payload.operation === 'angles') return parseAngleTokens(raw);
   if (payload.operation === 'script') {
     return parseScriptTokens(raw, {
@@ -528,6 +554,9 @@ async function handleQuotaRequest(
 ): Promise<Response> {
   if (request.method !== 'GET') {
     return jsonError('Use GET for AI planning usage.', 405, { Allow: 'GET' });
+  }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
   }
   const user = await authInstance.getUser(request);
   if (!user) return jsonError('Sign in with Freebuff to see AI planning usage.', 401);
@@ -634,6 +663,9 @@ async function handleImageJobGet(
   if (request.method !== 'GET') {
     return jsonError('Use GET to check an image job.', 405, { Allow: 'GET' });
   }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
+  }
   const user = await authInstance.getUser(request);
   if (!user) return jsonError('Sign in with Freebuff to check this image.', 401);
   if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
@@ -656,6 +688,8 @@ async function handleImageJobImage(
   if (request.method !== 'GET') {
     return jsonError('Use GET to download a generated image.', 405, { Allow: 'GET' });
   }
+  // Deliberately no origin gate: the bytes are session- and owner-scoped, and a
+  // direct URL visit (no Sec-Fetch-Site) is a legitimate way to open an image.
   const user = await authInstance.getUser(request);
   if (!user) return jsonError('Sign in with Freebuff to download this image.', 401);
   if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
@@ -762,6 +796,9 @@ async function handleNarrationUsage(
 ): Promise<Response> {
   if (request.method !== 'GET') {
     return jsonError('Use GET for narration usage.', 405, { Allow: 'GET' });
+  }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
   }
   const user = await authInstance.getUser(request);
   if (!user) return jsonError('Sign in with Freebuff to see narration usage.', 401);

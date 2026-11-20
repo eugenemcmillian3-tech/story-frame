@@ -1,7 +1,7 @@
 import type { AssetType, ProjectMode, TargetDuration, VisualPreset } from '../domain/types';
 import type { AiModelId } from './models';
 
-export type AiOperation = 'angles' | 'script' | 'storyboard';
+export type AiOperation = 'angles' | 'script' | 'storyboard' | 'edit';
 
 export interface AiBriefInput {
   topic: string;

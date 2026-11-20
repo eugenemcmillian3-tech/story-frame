@@ -18,6 +18,7 @@ import type { AiClaim } from '../src/ai/types';
 import { addPlanningNote, acceptStoryboardDraft, createProject, replaceScriptNarration, updateBrief, updateSourceNotes } from '../src/domain/project';
 import { addScene, setSceneLocks } from '../src/domain/storyboard';
 import { parseProjectJson } from '../src/domain/validation';
+import { SCHEMA_VERSION } from '../src/domain/types';
 
 const NOW = '2026-01-01T00:00:00.000Z';
 
@@ -447,7 +448,7 @@ describe('schema 3 migration', () => {
     const parsed = parseProjectJson(raw);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    expect(parsed.value.schemaVersion).toBe(4);
+    expect(parsed.value.schemaVersion).toBe(SCHEMA_VERSION);
     expect(parsed.value.planningNotes).toEqual([]);
     expect(parsed.value.storyboard.previous).toBeNull();
   });

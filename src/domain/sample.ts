@@ -171,5 +171,6 @@ export function createSampleProject(options: { now?: string; id?: string } = {})
       previous: null,
     },
     workflow: { lastStage: 'brief' },
+    editHistory: [],
   };
 }

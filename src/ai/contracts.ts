@@ -9,7 +9,14 @@ import type {
   ScriptSegmentKind,
   StoryboardProposalScene,
 } from './types';
-import type { AssetType, TargetDuration } from '../domain/types';
+import { SCENE_LOCK_KEYS } from '../domain/constants';
+import type {
+  AssetType,
+  EditBlockedTarget,
+  EditCommand,
+  SceneLockKey,
+  TargetDuration,
+} from '../domain/types';
 
 const ASSET_TYPES: readonly AssetType[] = [
   'image',
@@ -332,6 +339,144 @@ export function parseStoryboardTokens(value: unknown, script: string): Storyboar
     );
   }
   return { scenes, warnings };
+}
+
+export interface EditTokens {
+  commands: EditCommand[];
+  explanation: string;
+  alternatives: string[];
+  blocked: EditBlockedTarget[];
+  /**
+   * The provider refused because the narration script itself is locked. This is
+   * a flag rather than a `blocked` entry: the script is one project-level lock,
+   * not a scene component, and it is verified against `project.script.locked`.
+   */
+  blockedScript: boolean;
+}
+
+export const MAX_EDIT_COMMANDS = 8;
+
+const EDIT_KINDS = ['script.replace', 'scene.visual', 'scene.text', 'scene.duration'] as const;
+const EDIT_SCOPES = ['all', 'opening', 'ending'] as const;
+
+/**
+ * Directed-edit output is an allowlist, not a project patch. Each command may
+ * carry only its own named fields: any extra key is rejected rather than
+ * ignored, so a model cannot smuggle in a field the app does not expect.
+ */
+function exactKeys(source: Record<string, unknown>, allowed: string[], label: string): void {
+  for (const key of Object.keys(source)) {
+    if (!allowed.includes(key)) throw invalid(`${label} has an unsupported field.`);
+  }
+}
+
+function parseBlockedTargets(value: unknown): EditBlockedTarget[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw invalid('blocked must be an array.');
+  return value.slice(0, MAX_EDIT_COMMANDS).map((item, index) => {
+    const label = `blocked[${index}]`;
+    const target = record(item, label);
+    exactKeys(target, ['sceneId', 'component'], label);
+    const component = target.component;
+    if (
+      typeof component !== 'string' ||
+      !(SCENE_LOCK_KEYS as readonly string[]).includes(component)
+    ) {
+      throw invalid(`${label}.component must be a scene lock component.`);
+    }
+    return {
+      sceneId: text(target, 'sceneId', `${label}.sceneId`, 200),
+      component: component as SceneLockKey,
+    };
+  });
+}
+
+function parseEditCommand(value: unknown, index: number): EditCommand {
+  const label = `commands[${index}]`;
+  const command = record(value, label);
+  const kind = command.kind;
+  if (typeof kind !== 'string' || !(EDIT_KINDS as readonly string[]).includes(kind)) {
+    throw invalid(`${label}.kind is not an allowed edit command.`);
+  }
+  if (kind === 'script.replace') {
+    exactKeys(command, ['kind', 'scope', 'text', 'boundary'], label);
+    const scope = command.scope;
+    if (typeof scope !== 'string' || !(EDIT_SCOPES as readonly string[]).includes(scope)) {
+      throw invalid(`${label}.scope must be all, opening, or ending.`);
+    }
+    const fragment = text(command, 'text', `${label}.text`, 40_000);
+    const boundary =
+      scope === 'all'
+        ? ''
+        : text(command, 'boundary', `${label}.boundary`, 40_000);
+    return { kind, scope: scope as 'all' | 'opening' | 'ending', text: fragment, boundary };
+  }
+  if (kind === 'scene.visual') {
+    exactKeys(command, ['kind', 'sceneId', 'visualDirection'], label);
+    return {
+      kind,
+      sceneId: text(command, 'sceneId', `${label}.sceneId`, 200),
+      visualDirection: text(command, 'visualDirection', `${label}.visualDirection`, 4000),
+    };
+  }
+  if (kind === 'scene.text') {
+    exactKeys(command, ['kind', 'sceneId', 'onScreenText'], label);
+    return {
+      kind,
+      sceneId: text(command, 'sceneId', `${label}.sceneId`, 200),
+      onScreenText: text(command, 'onScreenText', `${label}.onScreenText`, 500, {
+        optional: true,
+      }),
+    };
+  }
+  exactKeys(command, ['kind', 'sceneId', 'plannedDuration'], label);
+  const duration = command.plannedDuration;
+  if (
+    typeof duration !== 'number' ||
+    !Number.isFinite(duration) ||
+    duration < 1 ||
+    duration > 600
+  ) {
+    throw invalid(`${label}.plannedDuration must be between 1 and 600 seconds.`);
+  }
+  return {
+    kind: 'scene.duration',
+    sceneId: text(command, 'sceneId', `${label}.sceneId`, 200),
+    plannedDuration: Math.round(duration),
+  };
+}
+
+/** Validates the shape and allowlist only; scene ids are checked against the project later. */
+export function parseEditTokens(value: unknown): EditTokens {
+  const root = record(value, 'Edit response');
+  exactKeys(
+    root,
+    ['commands', 'explanation', 'alternatives', 'blocked', 'blockedScript'],
+    'Edit response',
+  );
+  if (root.blockedScript !== undefined && typeof root.blockedScript !== 'boolean') {
+    throw invalid('blockedScript must be true or false.');
+  }
+  const commands = list(root, 'commands', 'commands', MAX_EDIT_COMMANDS).map((item, index) =>
+    parseEditCommand(item, index),
+  );
+  const explanation =
+    typeof root.explanation === 'string' ? root.explanation.trim().slice(0, 800) : '';
+  const alternatives = Array.isArray(root.alternatives)
+    ? root.alternatives
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim().slice(0, 300))
+        .filter(Boolean)
+        .slice(0, 4)
+    : [];
+  const blocked = parseBlockedTargets(root.blocked);
+  const blockedScript = root.blockedScript === true;
+  // A refusal means nothing could be applied. Accepting a partial plan would
+  // apply the commands while silently dropping the conflict it also named.
+  if (commands.length > 0 && (blocked.length > 0 || blockedScript)) {
+    throw invalid('A plan with commands cannot also name a refused target.');
+  }
+  return { commands, explanation, alternatives, blocked, blockedScript };
 }
 
 export function pacingWarnings(

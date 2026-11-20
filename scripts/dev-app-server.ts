@@ -196,6 +196,7 @@ function envFor(origin: string) {
     CF_API_TOKEN: process.env.CF_API_TOKEN,
     DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
     LEONARDO_API_KEY: process.env.LEONARDO_API_KEY,
+    OLLAMA_API_KEY: process.env.OLLAMA_API_KEY,
   };
 }
 
