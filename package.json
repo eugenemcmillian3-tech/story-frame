@@ -3,10 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "build": "tsc --noEmit && vite build",
     "build:worker": "esbuild worker/index.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=worker/dist/index.js --log-level=warning",
     "build:sites": "npm run build && npm run build:worker",
@@ -23,6 +27,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@testing-library/dom": "^10.0.0",
     "@testing-library/react": "^16.0.0",
     "@types/react": "^19.0.0",

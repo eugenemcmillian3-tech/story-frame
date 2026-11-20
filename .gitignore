@@ -4,5 +4,7 @@ worker/dist/
 .wrangler/
 .logs/
 artifacts/
+test-results/
+playwright-report/
 *.local
 .DS_Store
