@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "build:worker": "esbuild worker/index.ts --bundle --format=esm --platform=neutral --target=es2022 --outfile=worker/dist/index.js --log-level=warning",
     "build:sites": "npm run build && npm run build:worker",
+    "check:route": "npm run build:worker && esbuild scripts/local-route-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/local-route-check.mjs --log-level=warning && node /tmp/local-route-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
