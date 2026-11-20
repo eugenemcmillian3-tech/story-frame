@@ -743,7 +743,6 @@ async function handleNarrationCreate(
         'X-Narration-Voice': generated.job.voice,
         'X-Narration-Characters': String(generated.job.characters),
         'X-Narration-Estimated-Usd': generated.job.estimatedUsd.toFixed(6),
-        'X-Narration-Attempts': String(generated.job.attempts),
       },
     });
   } catch (error) {
