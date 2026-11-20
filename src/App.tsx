@@ -11,6 +11,7 @@ import { ScriptScreen } from './screens/ScriptScreen';
 import { StoryboardScreen } from './screens/StoryboardScreen';
 import { useAppState, useHashRoute } from './state/StoreProvider';
 import type { ProjectStore } from './state/store';
+import { requestPersistentStorage } from './media/storagePersistence';
 
 export function App({ store }: { store: ProjectStore }) {
   const state = useAppState();
@@ -19,6 +20,10 @@ export function App({ store }: { store: ProjectStore }) {
   useEffect(() => {
     store.syncRoute(route);
   }, [store, route]);
+
+  useEffect(() => {
+    void requestPersistentStorage();
+  }, []);
 
   useEffect(() => {
     document.title =

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AiStoryboardPlanner } from '../components/AiPlanning';
 import { Dialog } from '../components/Dialog';
+import { MissingMediaNotice } from '../components/MissingMediaNotice';
 import { SceneImageField } from '../components/SceneImageField';
 import { SceneImageGenerator } from '../components/SceneImageGenerator';
 import { Badge, Panel, SelectField, TextAreaField, TextField } from '../components/ui';
@@ -122,6 +123,8 @@ export function StoryboardScreen({ project }: { project: Project }) {
           {error}
         </p>
       ) : null}
+
+      <MissingMediaNotice project={project} />
 
       <AiStoryboardPlanner project={project} />
 
