@@ -285,4 +285,7 @@ test('renders a two-scene MP4 with video and audio tracks', async ({ page }) => 
   await expect(
     page.locator('.render-details > div').filter({ hasText: 'Frames encoded' }).locator('dd'),
   ).toHaveText(String(SCENES * SCENE_SECONDS * FPS));
+
+  // TEMPORARY: force a red run so CI's trace upload can be verified.
+  throw new Error('Forced failure to verify the Playwright trace upload');
 });
