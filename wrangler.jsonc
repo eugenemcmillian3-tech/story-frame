@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "storyframe-local",
+  "main": "worker/dist/index.js",
+  "compatibility_date": "2026-11-19",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "vars": {
+    "FREEBUFF_CLIENT_ID": "1c2403b4-1c2e-4790-87a2-398cac745912",
+    "FREEBUFF_ISSUER": "https://freebuff.com/oidc",
+    "APP_ORIGIN": "http://localhost:8787"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "storyframe-local",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}
