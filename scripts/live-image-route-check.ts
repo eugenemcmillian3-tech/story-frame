@@ -1,25 +1,25 @@
 /**
- * Live check of the image routes: one real, billable Workers AI generation
- * driven through the built Worker, over real HTTP routes, with a real-SQLite D1
- * shim and a stub OIDC issuer on loopback.
+ * Live check of the image routes: one real, billable generation on each provider
+ * (Cloudflare Workers AI and Leonardo.Ai) driven through the built Worker, over
+ * real HTTP routes, with a real-SQLite D1 shim and a stub OIDC issuer on
+ * loopback.
  *
- * It proves the route, the quota, the D1 schema, the provider call, the stored
- * bytes, the duplicate-submission guard and cross-user isolation. It attaches
- * nothing to a project and renders nothing; those steps are the client's, so
- * they need a signed-in browser.
+ * It proves the routes, the quota, the D1 schema, both provider calls, the
+ * polling, the stored bytes, the duplicate-submission guard and cross-user
+ * isolation. It attaches nothing to a project and renders nothing.
  *
- * Requires the Worker's own credentials:
- *   CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run check:image:route -- --yes
+ *   CF_ACCOUNT_ID=... CF_API_TOKEN=... LEONARDO_API_KEY=... \
+ *     npm run check:image:route -- --yes
  *
  * It refuses to generate without an explicit confirmation (--yes, or typing
- * "yes"), because it spends a real generation on the account.
+ * "yes") because it spends real generations on the accounts.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { IMAGE_MODEL, IMAGE_MODEL_LABEL, IMAGE_USD_ESTIMATE } from '../src/images/provider';
+import { imageModel } from '../src/images/provider';
 import worker from '../worker/dist/index';
 import { confirmSpend } from './confirm-spend';
 
@@ -31,10 +31,14 @@ const SERVER_PORT = 8798;
 
 const accountId = process.env.CF_ACCOUNT_ID;
 const apiToken = process.env.CF_API_TOKEN;
-if (!accountId || !apiToken) {
-  console.error('CF_ACCOUNT_ID and CF_API_TOKEN must be set in this environment. Rerun once they are.');
+const leonardoKey = process.env.LEONARDO_API_KEY;
+if (!accountId || !apiToken || !leonardoKey) {
+  console.error('CF_ACCOUNT_ID, CF_API_TOKEN and LEONARDO_API_KEY must be set in this environment.');
   process.exit(2);
 }
+
+const cfSpec = imageModel('cf-flux-schnell')!;
+const leoSpec = imageModel('leonardo-phoenix')!;
 
 const base64url = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64url');
 
@@ -182,6 +186,7 @@ const env = {
   APP_ORIGIN,
   CF_ACCOUNT_ID: accountId,
   CF_API_TOKEN: apiToken,
+  LEONARDO_API_KEY: leonardoKey,
 };
 
 function cookieJar() {
@@ -239,10 +244,7 @@ async function signIn(jar: ReturnType<typeof cookieJar>, sub: string): Promise<v
   withSubject.searchParams.set('login_hint', sub);
   const authorize = await fetch(withSubject.href, { redirect: 'manual' });
   const callbackUrl = authorize.headers.get('location') ?? '';
-  const callback = await call(
-    jar,
-    new URL(callbackUrl).pathname + new URL(callbackUrl).search,
-  );
+  const callback = await call(jar, new URL(callbackUrl).pathname + new URL(callbackUrl).search);
   await callback.text();
 }
 
@@ -261,6 +263,32 @@ function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
     offset += 2 + length;
   }
   return null;
+}
+
+async function download(
+  jar: ReturnType<typeof cookieJar>,
+  jobId: string,
+  file: string,
+  expected: { width: number; height: number },
+): Promise<void> {
+  const image = await call(jar, `/api/images/jobs/${jobId}/image`);
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  const size = isJpeg ? jpegSize(bytes) : null;
+  check(
+    `the stored bytes download as a ${expected.width}×${expected.height} JPEG`,
+    image.status === 200 &&
+      image.headers.get('content-type') === 'image/jpeg' &&
+      size?.width === expected.width &&
+      size?.height === expected.height,
+    `${image.status} ${image.headers.get('content-type')} ${(bytes.byteLength / 1024).toFixed(0)} KB ${
+      size ? `${size.width}×${size.height}` : ''
+    }`,
+  );
+  if (isJpeg) {
+    await mkdir('artifacts', { recursive: true });
+    await writeFile(`artifacts/${file}`, bytes);
+  }
 }
 
 const alice = cookieJar();
@@ -282,76 +310,103 @@ check('foreign origin is rejected', foreign.status === 403, `status ${foreign.st
 await foreign.text();
 
 await signIn(alice, 'local_alice');
-const sessionA = (await (await call(alice, '/auth/freebuff/session')).json()) as {
-  user?: { sub?: string };
-};
-check('sign-in produces a session', Boolean(sessionA.user?.sub), `sub ${sessionA.user?.sub ?? 'none'}`);
+const sessionCheck = await call(alice, '/auth/freebuff/session');
+const sessionBody = (await sessionCheck.json()) as { user?: { sub?: string } };
+check('sign-in produces a session', Boolean(sessionBody.user?.sub), `sub ${sessionBody.user?.sub ?? 'none'}`);
 
-const jobId = `ij_live_${Date.now().toString(36)}`;
-const body = {
-  id: jobId,
+await confirmSpend(
+  `This will generate 2 images through the image routes: one ${cfSpec.label} on Cloudflare Workers AI (list price about $${cfSpec.usdEstimate?.toFixed(4)}) and one ${leoSpec.label} on Leonardo.Ai (no published per-image price; it draws from the API balance). Taxes are not included.`,
+);
+
+const stamp = Date.now().toString(36);
+const cfJobId = `ij_live_cf_${stamp}`;
+const cfBody = {
+  id: cfJobId,
   sceneId: 'scn_live_1',
   projectId: 'prj_live_1',
   prompt:
     'A stone lighthouse on a storm-worn cliff at first light, wet grass, low sea fog, ' +
     'cinematic film still, soft directional light, no words, no text, no logos.',
   style: 'cinema-still',
+  modelId: 'cf-flux-schnell',
 };
 
-await confirmSpend(
-  `This will generate 1 image through the image route with ${IMAGE_MODEL_LABEL} (${IMAGE_MODEL}). Workers AI list price: about $${IMAGE_USD_ESTIMATE.toFixed(4)}, before the account plan, its free daily allowance and taxes.`,
-);
-
-const create = await call(alice, '/api/images/jobs', { method: 'POST', body });
+const create = await call(alice, '/api/images/jobs', { method: 'POST', body: cfBody });
 const created = (await create.json()) as {
-  job?: { id?: string; status?: string; model?: string; width?: number; height?: number };
+  job?: { id?: string; status?: string; model?: string; provider?: string };
   error?: string;
 };
-const generation = created.job;
 check(
-  'a real generation is created with 201',
-  create.status === 201 && generation?.id === jobId,
-  `${create.status} ${generation?.status ?? created.error ?? '?'}`,
+  'a Workers AI image is created with 201',
+  create.status === 201 && created.job?.status === 'completed',
+  `${create.status} ${created.job?.status ?? created.error ?? '?'}`,
 );
 check(
-  'the job records the Workers AI model and a completed image',
-  generation?.status === 'completed' && generation?.model === IMAGE_MODEL,
-  `${generation?.status ?? '?'} · ${generation?.model ?? '?'}`,
-);
-check(
-  'the recorded frame is the model’s documented size',
-  generation?.width === 1024 && generation?.height === 1024,
-  `${generation?.width ?? '?'}×${generation?.height ?? '?'}`,
+  'the job records the Cloudflare provider and model',
+  created.job?.provider === 'workers-ai' && created.job?.model === cfSpec.model,
+  `${created.job?.provider ?? '?'} · ${created.job?.model ?? '?'}`,
 );
 
-const duplicate = await call(alice, '/api/images/jobs', { method: 'POST', body });
-const duplicateBody = (await duplicate.json()) as { job?: { id?: string; status?: string } };
+const duplicate = await call(alice, '/api/images/jobs', { method: 'POST', body: cfBody });
+const duplicateBody = (await duplicate.json()) as { job?: { id?: string } };
 check(
   'a duplicate submission returns the recorded job instead of billing twice',
-  duplicate.status === 200 && duplicateBody.job?.id === jobId,
+  duplicate.status === 200 && duplicateBody.job?.id === cfJobId,
   `${duplicate.status} ${duplicateBody.job?.id ?? '?'}`,
 );
+await download(alice, cfJobId, 'live-route-scene-cloudflare.jpg', { width: 1_024, height: 1_024 });
 
-const image = await call(alice, `/api/images/jobs/${jobId}/image`);
-const bytes = new Uint8Array(await image.arrayBuffer());
-const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
-const size = isJpeg ? jpegSize(bytes) : null;
+const leoJobId = `ij_live_leo_${stamp}`;
+const leoBody = {
+  id: leoJobId,
+  sceneId: 'scn_live_2',
+  projectId: 'prj_live_1',
+  prompt:
+    'A quiet harbour town at dusk from a stone pier, wet cobbles, warm window light, ' +
+    'cinematic film still, no words, no text, no logos.',
+  style: 'cinema-still',
+  modelId: 'leonardo-phoenix',
+};
+
+const leoCreate = await call(alice, '/api/images/jobs', { method: 'POST', body: leoBody });
+const leoCreated = (await leoCreate.json()) as {
+  job?: { status?: string; provider?: string; model?: string; providerJobId?: string | null };
+  error?: string;
+};
 check(
-  'the stored bytes download as a 1024×1024 JPEG',
-  image.status === 200 &&
-    image.headers.get('content-type') === 'image/jpeg' &&
-    size?.width === 1024 &&
-    size?.height === 1024,
-  `${image.status} ${image.headers.get('content-type')} ${(bytes.byteLength / 1024).toFixed(0)} KB ${
-    size ? `${size.width}×${size.height}` : ''
-  }`,
+  'a Leonardo generation is queued with 202',
+  leoCreate.status === 202 && leoCreated.job?.status === 'queued',
+  `${leoCreate.status} ${leoCreated.job?.status ?? leoCreated.error ?? '?'} provider job ${leoCreated.job?.providerJobId ?? 'none'}`,
 );
-if (isJpeg) {
-  await mkdir('artifacts', { recursive: true });
-  await writeFile('artifacts/live-route-scene.jpg', bytes);
+check(
+  'the job records the Leonardo provider and model',
+  leoCreated.job?.provider === 'leonardo' && leoCreated.job?.model === leoSpec.model,
+  `${leoCreated.job?.provider ?? '?'} · ${leoCreated.job?.model ?? '?'}`,
+);
+
+let leoStatus = leoCreated.job?.status ?? '';
+let leoFinal: { status?: string; error?: string | null; providerCreditCost?: number | null } = {};
+for (let attempt = 0; attempt < 40 && leoStatus !== 'completed' && leoStatus !== 'failed'; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  const poll = await call(alice, `/api/images/jobs/${leoJobId}`);
+  const polled = (await poll.json()) as { job?: typeof leoFinal & { status?: string } };
+  leoFinal = polled.job ?? {};
+  leoStatus = polled.job?.status ?? 'unknown';
+  console.log(`  poll ${attempt + 1}: ${leoStatus}`);
+}
+check(
+  'the Leonardo job completes with a real image',
+  leoStatus === 'completed',
+  `${leoStatus}${leoFinal.error ? ` — ${leoFinal.error}` : ''} credits ${leoFinal.providerCreditCost ?? 'not reported'}`,
+);
+if (leoStatus === 'completed') {
+  await download(alice, leoJobId, 'live-route-scene-leonardo.jpg', {
+    width: leoSpec.width,
+    height: leoSpec.height,
+  });
 }
 
-const reread = await call(alice, `/api/images/jobs/${jobId}`);
+const reread = await call(alice, `/api/images/jobs/${cfJobId}`);
 const rereadBody = (await reread.json()) as { job?: { status?: string } };
 check(
   'a finished job is served from storage',
@@ -364,18 +419,24 @@ const quotaRows = db.database
   .all('local_alice') as Array<{ window_key: string; requests: number }>;
 const dayRow = quotaRows.find((row) => row.window_key.startsWith('img:d:'));
 check(
-  'one billable image was counted against the daily budget',
-  dayRow?.requests === 1,
+  'both billable images were counted against the daily budget',
+  dayRow?.requests === 2,
   quotaRows.map((row) => `${row.window_key}=${row.requests}`).join(', ') || 'no rows',
 );
 
 await signIn(bob, 'local_bob');
-const foreignJob = await call(bob, `/api/images/jobs/${jobId}`);
-check("another user cannot read the job", foreignJob.status === 404, `status ${foreignJob.status}`);
-await foreignJob.text();
-const foreignImage = await call(bob, `/api/images/jobs/${jobId}/image`);
-check("another user cannot download the image", foreignImage.status === 404, `status ${foreignImage.status}`);
-await foreignImage.text();
+for (const jobId of [cfJobId, leoJobId]) {
+  const foreignJob = await call(bob, `/api/images/jobs/${jobId}`);
+  check(`another user cannot read job ${jobId.slice(-12)}`, foreignJob.status === 404, `status ${foreignJob.status}`);
+  await foreignJob.text();
+  const foreignImage = await call(bob, `/api/images/jobs/${jobId}/image`);
+  check(
+    `another user cannot download image ${jobId.slice(-12)}`,
+    foreignImage.status === 404,
+    `status ${foreignImage.status}`,
+  );
+  await foreignImage.text();
+}
 
 console.log(results.join('\n'));
 const failures = results.filter((line) => line.startsWith('FAIL')).length;

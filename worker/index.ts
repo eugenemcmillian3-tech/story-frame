@@ -6,12 +6,12 @@ import type { AiRequestPayload } from '../src/ai/input';
 import { AiError } from '../src/ai/types';
 import type { AiOperation } from '../src/ai/types';
 import {
-  IMAGE_NOT_CONFIGURED,
   ImageJobError,
+  cancelImageJob,
   ensureImageSchema,
   fetchImageJobImage,
   parseImageJobRequest,
-  readImageJob,
+  refreshImageJob,
   submitImageJob,
 } from './imageJobs';
 
@@ -36,6 +36,8 @@ interface Env {
   CF_ACCOUNT_ID?: string;
   CF_API_TOKEN?: string;
   CF_AI_BASE?: string;
+  LEONARDO_API_KEY?: string;
+  LEONARDO_API_BASE?: string;
 }
 
 const MAX_BODY_BYTES = 180_000;
@@ -542,7 +544,7 @@ async function handleQuotaRequest(
   });
 }
 
-const IMAGE_JOB_PATH = /^\/api\/images\/jobs\/([A-Za-z0-9_-]{8,80})(?:\/(image))?$/;
+const IMAGE_JOB_PATH = /^\/api\/images\/jobs\/([A-Za-z0-9_-]{8,80})(?:\/(image|cancel))?$/;
 
 async function readBoundedText(request: Request, limit: number): Promise<string | null> {
   const contentLength = request.headers.get('content-length');
@@ -572,9 +574,6 @@ async function handleImageJobCreate(
   if (!env.DB) {
     return jsonError('The image job database is not attached to this deployment.', 503);
   }
-  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) {
-    return jsonError(IMAGE_NOT_CONFIGURED, 503);
-  }
   const raw = await readBoundedText(request, MAX_IMAGE_BODY_BYTES);
   if (raw === null) return jsonError('The image request is too large.', 413);
   let body: unknown;
@@ -596,13 +595,15 @@ async function handleImageJobCreate(
     await consumeImageQuota(env.DB, user.sub);
     const { job, created } = await submitImageJob(env.DB, env, user.sub, parsed);
     if (!created) await releaseImageQuota(env.DB, user.sub);
-    return jsonOk({ job }, created ? 201 : 200);
+    // Leonardo queues the generation; Workers AI returns it in this response.
+    return jsonOk({ job }, created ? (job.status === 'completed' ? 201 : 202) : 200);
   } catch (error) {
     // A rejected or unacknowledged submission did not start billable work, so
     // its quota slot goes back. Provider failures after acknowledgement keep it.
     if (
       error instanceof ImageJobError &&
       (error.status === 400 ||
+        error.status === 402 ||
         error.status === 409 ||
         error.status === 429 ||
         error.status === 503)
@@ -626,8 +627,9 @@ async function handleImageJobGet(
   if (!user) return jsonError('Sign in with Freebuff to check this image.', 401);
   if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
   try {
-    const job = await readImageJob(env.DB, user.sub, id);
-    if (!job) return jsonError('That image job was not found.', 404);
+    // Polls an asynchronous provider; a finished or synchronous job is returned
+    // as stored, without calling the provider again.
+    const job = await refreshImageJob(env.DB, env, user.sub, id);
     return jsonOk({ job });
   } catch (error) {
     return imageErrorResponse(error);
@@ -660,6 +662,29 @@ async function handleImageJobImage(
         'X-Content-Type-Options': 'nosniff',
       },
     });
+  } catch (error) {
+    return imageErrorResponse(error);
+  }
+}
+
+async function handleImageJobCancel(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+  id: string,
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return jsonError('Use POST to cancel an image job.', 405, { Allow: 'POST' });
+  }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to cancel an image job.', 401);
+  if (!env.DB) return jsonError('The image job database is not attached to this deployment.', 503);
+  try {
+    const job = await cancelImageJob(env.DB, env, user.sub, id);
+    return jsonOk({ job });
   } catch (error) {
     return imageErrorResponse(error);
   }
@@ -707,6 +732,9 @@ function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
       try {
         if (action === 'image') {
           return await handleImageJobImage(request, requestEnv, authInstance, id);
+        }
+        if (action === 'cancel') {
+          return await handleImageJobCancel(request, requestEnv, authInstance, id);
         }
         return await handleImageJobGet(request, requestEnv, authInstance, id);
       } catch {

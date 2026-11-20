@@ -5,14 +5,17 @@ export type { ImageJobSettings, ImageJobStatus };
 export interface ImageJobView {
   id: string;
   status: ImageJobStatus;
+  provider: string;
   model: string;
   prompt: string;
   settings: ImageJobSettings;
   sceneId: string;
   projectId: string;
+  providerJobId: string | null;
   width: number | null;
   height: number | null;
   inferenceSeconds: number | null;
+  providerCreditCost: number | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -24,15 +27,17 @@ export interface SubmitImageJobInput {
   projectId: string;
   prompt: string;
   style: string;
+  modelId: string;
 }
 
 const STATUS_MESSAGES: Record<number, string> = {
   401: 'Sign in with Freebuff to generate scene images.',
+  402: 'The Leonardo API balance cannot cover this generation. Top up the API balance and try again.',
   403: 'This request was refused. Reload the page and try again.',
   409: 'That image request is already being processed.',
   413: 'The image request is too large.',
   429: 'The image generation limit for this account was reached. Try again later.',
-  503: 'Image generation is not configured yet. Add CF_ACCOUNT_ID and CF_API_TOKEN in Sites → Secrets.',
+  503: 'Image generation is not configured yet. Add the provider credentials in Sites → Secrets.',
 };
 
 async function readError(response: Response): Promise<string> {
@@ -76,8 +81,8 @@ async function readJob(response: Response): Promise<ImageJobView> {
 }
 
 /**
- * Generates one scene. The request id is the idempotency record on the server,
- * so a resubmission returns the same job instead of paying for a second image.
+ * Submits one scene. The request id is the idempotency record on the server, so
+ * a resubmission returns the same job instead of paying for a second image.
  * A transport failure is not retried here: the request may already have reached
  * the provider, and a blind retry could pay for it twice.
  */
@@ -97,14 +102,46 @@ export async function submitImageJob(
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new Error(
-      'The image service could not be reached. Cloudflare may or may not have received the request, so check this scene before generating it again.',
+      'The image service could not be reached. The provider may or may not have received the request, so check this scene before generating it again.',
     );
   }
   if (!response.ok) throw new Error(await readError(response));
   return readJob(response);
 }
 
-/** Downloads the stored file once; the caller stores it as a real media asset. */
+export async function getImageJob(id: string, signal?: AbortSignal): Promise<ImageJobView> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/images/jobs/${encodeURIComponent(id)}`, {
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+      signal,
+      cache: 'no-store',
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new Error('The image status could not be checked. Check your connection and retry.');
+  }
+  if (!response.ok) throw new Error(await readError(response));
+  return readJob(response);
+}
+
+export async function cancelImageJob(id: string): Promise<ImageJobView> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/images/jobs/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+    });
+  } catch {
+    throw new Error('The cancel request could not be sent. The image may still complete.');
+  }
+  if (!response.ok) throw new Error(await readError(response));
+  return readJob(response);
+}
+
+/** Downloads the completed file once; the caller stores it as a real media asset. */
 export async function fetchGeneratedImage(id: string, signal?: AbortSignal): Promise<Blob> {
   let response: Response;
   try {

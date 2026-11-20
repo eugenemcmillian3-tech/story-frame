@@ -13,6 +13,7 @@
     "check:route": "npm run build:worker && esbuild scripts/local-route-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/local-route-check.mjs --log-level=warning && node /tmp/local-route-check.mjs",
     "check:image:route": "npm run build:worker && esbuild scripts/live-image-route-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/live-image-route-check.mjs --log-level=warning && node /tmp/live-image-route-check.mjs",
     "check:image": "esbuild scripts/live-image-check.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/live-image-check.mjs --log-level=warning && node /tmp/live-image-check.mjs",
+    "dev:app": "npm run build:sites && esbuild scripts/dev-app-server.ts --bundle --format=esm --platform=node --target=node20 --outfile=/tmp/dev-app-server.mjs --log-level=warning && node /tmp/dev-app-server.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -3,39 +3,51 @@ import type { ReactNode } from 'react';
 import { SignInWithFreebuff, useFreebuffUser } from '@freebuff/auth/react';
 import { updateScene } from '../domain/storyboard';
 import type { Project, Scene } from '../domain/types';
-import { fetchGeneratedImage, submitImageJob } from '../images/api';
 import {
-  IMAGE_MODEL,
-  IMAGE_MODEL_LABEL,
-  IMAGE_PRICING_SOURCE,
-  IMAGE_PROVIDER,
-  IMAGE_PROVIDER_LABEL,
-  IMAGE_SIZE,
-  IMAGE_STEPS,
+  cancelImageJob,
+  fetchGeneratedImage,
+  getImageJob,
+  submitImageJob,
+} from '../images/api';
+import type { ImageJobStatus, ImageJobView } from '../images/api';
+import {
+  DEFAULT_IMAGE_MODEL,
+  IMAGE_MODELS,
+  IMAGE_PROVIDER_LABELS,
   IMAGE_STYLES,
-  IMAGE_USD_ESTIMATE,
   MAX_PROMPT_CHARS,
   buildSceneImagePrompt,
+  imageModel,
   styleById,
 } from '../images/provider';
-import type { ImageStyleId } from '../images/provider';
+import type { ImageModelId, ImageModelSpec, ImageStyleId } from '../images/provider';
 import { deleteAsset } from '../media/mediaDb';
 import { storeGeneratedSceneImage } from '../media/imageAssets';
 import { Badge, Panel, SelectField, TextAreaField } from './ui';
 import { Dialog } from './Dialog';
 
 const MAX_BATCH = 4;
+const POLL_INTERVAL_MS = 2_500;
+const JOB_TIMEOUT_MS = 8 * 60_000;
 
-interface GenerationResult {
+type RunStatus = ImageJobStatus | 'timed_out';
+
+interface SceneRun {
   jobId: string;
   sceneId: string;
+  status: RunStatus;
   prompt: string;
   style: string;
-  blob: Blob;
-  url: string;
+  modelId: ImageModelId;
+  model: string;
+  provider: string;
+  startedAt: number;
   width: number;
   height: number;
   inferenceSeconds: number | null;
+  providerCreditCost: number | null;
+  preview: { blob: Blob; url: string } | null;
+  error: string | null;
 }
 
 function requestId(): string {
@@ -46,6 +58,30 @@ function requestId(): string {
   return `ij_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function isTerminal(status: RunStatus): boolean {
+  return (
+    status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'timed_out'
+  );
+}
+
+function runLabel(status: RunStatus): string {
+  if (status === 'submitting') return 'Submitting';
+  if (status === 'queued') return 'Queued at provider';
+  if (status === 'in_progress') return 'Generating';
+  if (status === 'completed') return 'Ready to review';
+  if (status === 'cancelled') return 'Cancelled';
+  if (status === 'timed_out') return 'Still running';
+  return 'Failed';
+}
+
+function runTone(status: RunStatus): 'ok' | 'warn' | 'danger' | 'neutral' | 'accent' {
+  if (status === 'completed') return 'ok';
+  if (status === 'failed') return 'danger';
+  if (status === 'cancelled') return 'neutral';
+  if (status === 'timed_out') return 'warn';
+  return 'accent';
+}
+
 function messageFor(error: unknown): string {
   return error instanceof Error && error.message
     ? error.message
@@ -54,6 +90,16 @@ function messageFor(error: unknown): string {
 
 function usd(amount: number): string {
   return `$${amount.toFixed(4)}`;
+}
+
+/** What spending on this model means, before the user confirms it. */
+function costLine(spec: ImageModelSpec, count: number): string {
+  if (spec.usdEstimate !== null) {
+    return `${count} image${count === 1 ? '' : 's'} at about ${usd(spec.usdEstimate)} each (~${usd(
+      spec.usdEstimate * count,
+    )}), the published Workers AI list price before the account's free daily allowance, its plan and taxes.`;
+  }
+  return `${count} image${count === 1 ? '' : 's'} on ${spec.label}. Leonardo publishes no fixed per-image price: each generation draws from the API balance, and the API credit cost it reports is recorded with the image. Taxes are not included.`;
 }
 
 export function SceneImageGenerator({
@@ -95,7 +141,7 @@ function SignedIn({ children }: { children: ReactNode }) {
     return (
       <Panel
         title="Generate scene images"
-        description="Image generation runs on the app server with the Workers AI credentials. Sign in to generate; uploading your own images needs no account."
+        description="Image generation runs on the app server with the providers' own keys. Sign in to generate; uploading your own images needs no account."
       >
         <div className="row">
           <SignInWithFreebuff
@@ -128,18 +174,21 @@ function Generator({
     return first ? [first] : [];
   });
   const [styleId, setStyleId] = useState<ImageStyleId>('preset');
+  const [modelId, setModelId] = useState<ImageModelId>(DEFAULT_IMAGE_MODEL);
   const [prompts, setPrompts] = useState<Record<string, string>>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [replaceTarget, setReplaceTarget] = useState<GenerationResult | null>(null);
-  const [results, setResults] = useState<GenerationResult[]>([]);
+  const [replaceTarget, setReplaceTarget] = useState<SceneRun | null>(null);
+  const [runs, setRuns] = useState<Record<string, SceneRun>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const editedPrompts = useRef<Set<string>>(new Set());
   const previewUrls = useRef<Set<string>>(new Set());
+  const runsRef = useRef(runs);
+  runsRef.current = runs;
 
+  const spec = imageModel(modelId) ?? IMAGE_MODELS[0];
   const selectedScenes = useMemo(
     () => scenes.filter((scene) => selectedIds.includes(scene.id)),
     [scenes, selectedIds],
@@ -174,12 +223,100 @@ function Generator({
     [],
   );
 
+  const updateRun = (jobId: string, patch: (run: SceneRun) => Partial<SceneRun>) => {
+    setRuns((current) => {
+      const run = current[jobId];
+      if (!run) return current;
+      return { ...current, [jobId]: { ...run, ...patch(run) } };
+    });
+  };
+
+  const pendingKey = Object.values(runs)
+    .filter((run) => !isTerminal(run.status))
+    .map((run) => run.jobId)
+    .sort()
+    .join(',');
+
+  // Only an asynchronous provider leaves a job to check; a synchronous image is
+  // already in the run when it is created.
+  useEffect(() => {
+    if (pendingKey === '') return;
+    let stopped = false;
+    let timer: number | undefined;
+    const ids = pendingKey.split(',');
+
+    const poll = async () => {
+      for (const id of ids) {
+        if (stopped) return;
+        const run = runsRef.current[id];
+        if (!run || isTerminal(run.status)) continue;
+        if (Date.now() - run.startedAt > JOB_TIMEOUT_MS) {
+          updateRun(id, () => ({ status: 'timed_out' }));
+          continue;
+        }
+        try {
+          const job: ImageJobView = await getImageJob(id);
+          if (stopped) return;
+          if (job.status === 'completed') {
+            const blob = await fetchGeneratedImage(id);
+            if (stopped) return;
+            const url = URL.createObjectURL(blob);
+            previewUrls.current.add(url);
+            updateRun(id, () => ({
+              status: 'completed',
+              preview: { blob, url },
+              width: job.width ?? run.width,
+              height: job.height ?? run.height,
+              inferenceSeconds: job.inferenceSeconds,
+              providerCreditCost: job.providerCreditCost,
+              error: null,
+            }));
+          } else if (job.status === 'failed' || job.status === 'cancelled') {
+            updateRun(id, () => ({
+              status: job.status,
+              error:
+                job.error ??
+                (job.status === 'cancelled'
+                  ? 'Cancelled at Leonardo. Whether a cancelled generation is charged is Leonardo’s decision.'
+                  : 'The image could not be generated.'),
+            }));
+          } else {
+            updateRun(id, () => ({ status: job.status }));
+          }
+        } catch (reason) {
+          if (stopped) return;
+          updateRun(id, (current) => ({ error: messageFor(reason), status: current.status }));
+        }
+      }
+      if (stopped) return;
+      const stillPending = ids.some((id) => {
+        const run = runsRef.current[id];
+        return run && !isTerminal(run.status);
+      });
+      if (stillPending) timer = window.setTimeout(poll, POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [pendingKey]);
+
   const toggleScene = (sceneId: string) => {
     setSelectedIds((current) => {
       if (current.includes(sceneId)) return current.filter((id) => id !== sceneId);
       if (current.length >= MAX_BATCH) return current;
       return [...current, sceneId];
     });
+  };
+
+  /** Shows a finished image immediately instead of waiting for the poll loop. */
+  const showPreview = async (job: ImageJobView) => {
+    const blob = await fetchGeneratedImage(job.id);
+    const url = URL.createObjectURL(blob);
+    previewUrls.current.add(url);
+    return { blob, url };
   };
 
   const generate = async () => {
@@ -189,64 +326,88 @@ function Generator({
     setError(null);
     setNotice(null);
     const failures: string[] = [];
-    const created: GenerationResult[] = [];
-    for (const [index, scene] of selectedScenes.entries()) {
-      setProgress({ done: index, total: selectedScenes.length });
+    let submitted = 0;
+    for (const scene of selectedScenes) {
       const title = scene.title || 'Untitled scene';
       const prompt = (prompts[scene.id] ?? '').trim();
       if (prompt === '') {
         failures.push(`“${title}” has no prompt.`);
         continue;
       }
+      const id = requestId();
       try {
         const job = await submitImageJob({
-          id: requestId(),
+          id,
           sceneId: scene.id,
           projectId: project.id,
           prompt,
           style: styleId,
+          modelId,
         });
-        if (job.status !== 'completed') {
-          throw new Error(job.error ?? 'The image was not generated.');
-        }
-        const blob = await fetchGeneratedImage(job.id);
-        const url = URL.createObjectURL(blob);
-        previewUrls.current.add(url);
-        created.push({
-          jobId: job.id,
-          sceneId: scene.id,
-          prompt,
-          style: styleId,
-          blob,
-          url,
-          width: job.width ?? IMAGE_SIZE,
-          height: job.height ?? IMAGE_SIZE,
-          inferenceSeconds: job.inferenceSeconds,
-        });
+        const preview = job.status === 'completed' ? await showPreview(job) : null;
+        setRuns((current) => ({
+          ...current,
+          [job.id]: {
+            jobId: job.id,
+            sceneId: scene.id,
+            status: job.status,
+            prompt,
+            style: styleId,
+            modelId: spec.id,
+            model: job.model,
+            provider: job.provider,
+            startedAt: Date.now(),
+            width: job.width ?? spec.width,
+            height: job.height ?? spec.height,
+            inferenceSeconds: job.inferenceSeconds,
+            providerCreditCost: job.providerCreditCost,
+            preview,
+            error: job.status === 'failed' ? (job.error ?? 'The image could not be generated.') : null,
+          },
+        }));
+        submitted += 1;
       } catch (reason) {
         failures.push(`${title}: ${messageFor(reason)}`);
       }
     }
-    setResults((current) => [...current, ...created]);
-    setProgress(null);
     setBusy(false);
     if (failures.length > 0) setError(failures.join(' '));
-    else
+    if (submitted > 0)
       setNotice(
-        `${created.length} image${created.length === 1 ? '' : 's'} ready. Review ${
-          created.length === 1 ? 'it' : 'them'
-        } below before attaching.`,
+        `${submitted} image${submitted === 1 ? '' : 's'} requested. Review each result before attaching it.`,
       );
   };
 
-  const discard = (result: GenerationResult) => {
-    URL.revokeObjectURL(result.url);
-    previewUrls.current.delete(result.url);
-    setResults((current) => current.filter((candidate) => candidate.jobId !== result.jobId));
+  const discard = (run: SceneRun) => {
+    if (run.preview) {
+      URL.revokeObjectURL(run.preview.url);
+      previewUrls.current.delete(run.preview.url);
+    }
+    setRuns((current) => {
+      const next = { ...current };
+      delete next[run.jobId];
+      return next;
+    });
   };
 
-  const requestAttach = (result: GenerationResult) => {
-    const scene = scenes.find((candidate) => candidate.id === result.sceneId);
+  const cancel = async (run: SceneRun) => {
+    setError(null);
+    try {
+      const job = await cancelImageJob(run.jobId);
+      updateRun(run.jobId, () => ({
+        status: job.status,
+        error:
+          job.status === 'cancelled'
+            ? 'Cancelled at Leonardo. Whether a cancelled generation is charged is Leonardo’s decision.'
+            : job.error,
+      }));
+    } catch (reason) {
+      setError(messageFor(reason));
+    }
+  };
+
+  const requestAttach = (run: SceneRun) => {
+    const scene = scenes.find((candidate) => candidate.id === run.sceneId);
     if (!scene) {
       setError('That scene no longer exists. Discard this result.');
       return;
@@ -256,33 +417,33 @@ function Generator({
       return;
     }
     if (scene.imageAssetId) {
-      setReplaceTarget(result);
+      setReplaceTarget(run);
       return;
     }
-    void attach(result);
+    void attach(run);
   };
 
-  const attach = async (result: GenerationResult) => {
+  const attach = async (run: SceneRun) => {
     setReplaceTarget(null);
-    const scene = scenes.find((candidate) => candidate.id === result.sceneId);
-    if (!scene) return;
+    const scene = scenes.find((candidate) => candidate.id === run.sceneId);
+    if (!scene || !run.preview) return;
     setBusy(true);
     setError(null);
     try {
       const record = await storeGeneratedSceneImage(
         project.id,
-        result.blob,
+        run.preview.blob,
         {
-          provider: IMAGE_PROVIDER,
-          model: IMAGE_MODEL,
-          prompt: result.prompt,
-          width: result.width,
-          height: result.height,
+          provider: run.provider,
+          model: run.model,
+          prompt: run.prompt,
+          width: run.width,
+          height: run.height,
           outputFormat: 'jpeg',
-          style: result.style,
-          jobId: result.jobId,
+          style: run.style,
+          jobId: run.jobId,
           generatedAt: new Date().toISOString(),
-          inferenceSeconds: result.inferenceSeconds,
+          inferenceSeconds: run.inferenceSeconds,
         },
         scene.imageAssetId,
       );
@@ -294,7 +455,7 @@ function Generator({
         setError('The image was not attached because the scene could not be changed.');
         return;
       }
-      discard(result);
+      discard(run);
       onCleanupMedia();
       setNotice(
         `Attached the generated image to “${scene.title || 'Untitled scene'}”. The previous image is kept and can be restored from the scene's image field.`,
@@ -317,7 +478,7 @@ function Generator({
   return (
     <Panel
       title="Generate scene images"
-      description={`One provider: ${IMAGE_PROVIDER_LABEL} (${IMAGE_MODEL_LABEL}), called from the app server with the account's own Cloudflare credentials. Prompts start from each scene’s visual direction and the project preset, and you edit them before anything is sent. Uploaded images keep working exactly as before.`}
+      description="Two providers: Cloudflare Workers AI (FLUX.1 Schnell, on the account's free daily allowance first) and Leonardo.Ai (Phoenix 1.0 and Lucid Origin). Prompts start from each scene’s visual direction and the project preset, and you edit them before anything is sent. Uploaded images keep working exactly as before."
     >
       {error ? (
         <p className="notice notice-warn" role="alert">
@@ -363,6 +524,31 @@ function Generator({
 
       <div className="form-grid">
         <SelectField
+          id={`image-model-${project.id}`}
+          label="Provider and model"
+          value={modelId}
+          onChange={(event) => {
+            setModelId(event.target.value as ImageModelId);
+            editedPrompts.current.clear();
+          }}
+          hint={spec.note}
+        >
+          <optgroup label={IMAGE_PROVIDER_LABELS['workers-ai']}>
+            {IMAGE_MODELS.filter((option) => option.provider === 'workers-ai').map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label={IMAGE_PROVIDER_LABELS.leonardo}>
+            {IMAGE_MODELS.filter((option) => option.provider === 'leonardo').map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </optgroup>
+        </SelectField>
+        <SelectField
           id={`image-style-${project.id}`}
           label="Style setting"
           value={styleId}
@@ -382,10 +568,9 @@ function Generator({
       </div>
 
       <p className="muted-small">
-        {IMAGE_MODEL_LABEL} returns one {IMAGE_SIZE}×{IMAGE_SIZE} JPEG at {IMAGE_STEPS} steps.
-        Text-to-image only: the prompt is the whole input, so no reference image is sent. Style,
-        framing and subject come from the prompt. Use Fit or Fill on a scene to place the square
-        frame in the vertical video, and upload your own image to any scene instead if you prefer.
+        {spec.width}×{spec.height} on this model. Text-to-image only: the prompt is the whole input,
+        so no reference image is sent. Style, framing and subject come from the prompt; use Fit or
+        Fill on a scene to place the frame in the vertical video, or upload your own image instead.
       </p>
 
       {selectedScenes.length === 0 ? (
@@ -404,7 +589,7 @@ function Generator({
                 editedPrompts.current.add(scene.id);
                 setPrompts((current) => ({ ...current, [scene.id]: event.target.value }));
               }}
-              hint="Editable before submission. Cloudflare receives exactly this text."
+              hint="Editable before submission. The provider receives exactly this text."
             />
           ))}
         </div>
@@ -412,16 +597,7 @@ function Generator({
 
       {selectedScenes.length > 0 ? (
         <div className="stack">
-          <p className="muted-small">
-            {selectedScenes.length} image{selectedScenes.length === 1 ? '' : 's'} at{' '}
-            {usd(IMAGE_USD_ESTIMATE)} each ({usd(IMAGE_USD_ESTIMATE * selectedScenes.length)}), the
-            published Workers AI list price for {IMAGE_SIZE}×{IMAGE_SIZE} at {IMAGE_STEPS} steps,
-            before your account's plan, its free daily allowance and taxes.{' '}
-            <a href={IMAGE_PRICING_SOURCE} target="_blank" rel="noreferrer">
-              Workers AI pricing
-            </a>
-            .
-          </p>
+          <p className="muted-small">{costLine(spec, selectedScenes.length)}</p>
           <div className="row">
             <button
               type="button"
@@ -429,61 +605,108 @@ function Generator({
               disabled={busy}
               onClick={() => setConfirmOpen(true)}
             >
-              {busy && progress
-                ? `Generating ${progress.done + 1} of ${progress.total}…`
-                : `Review and generate ${selectedScenes.length} image${
-                    selectedScenes.length === 1 ? '' : 's'
-                  }`}
+              Review and generate {selectedScenes.length} image
+              {selectedScenes.length === 1 ? '' : 's'}
             </button>
           </div>
         </div>
       ) : null}
 
-      {results.length > 0 ? (
+      {Object.values(runs).length > 0 ? (
         <div className="stack">
           <h3 className="ai-proposal-title">Results</h3>
           <p className="muted-small">
             Previews are temporary. Attach the ones you want; until then they are not part of the
             project and are lost on reload.
           </p>
-          {results.map((result) => {
-            const scene = scenes.find((candidate) => candidate.id === result.sceneId);
+          {Object.values(runs).map((run) => {
+            const scene = scenes.find((candidate) => candidate.id === run.sceneId);
+            const runSpec = imageModel(run.modelId);
             return (
-              <div key={result.jobId} className="media-card">
-                <img
-                  className="media-thumb"
-                  src={result.url}
-                  alt={`Generated preview for ${sceneTitle(result.sceneId)}`}
-                />
+              <div key={run.jobId} className="media-card">
+                {run.preview ? (
+                  <img
+                    className="media-thumb"
+                    src={run.preview.url}
+                    alt={`Generated preview for ${sceneTitle(run.sceneId)}`}
+                  />
+                ) : null}
                 <div className="media-meta">
                   <div className="row">
-                    <Badge tone="ok">Ready to review</Badge>
-                    <span>{sceneLabel(result.sceneId)}</span>
+                    <Badge tone={runTone(run.status)}>{runLabel(run.status)}</Badge>
+                    <span>{sceneLabel(run.sceneId)}</span>
                   </div>
-                  <span className="media-asset-id">Job {result.jobId.slice(0, 24)}…</span>
+                  <span className="media-asset-id">Job {run.jobId.slice(0, 24)}…</span>
                   <span>
-                    {result.width}×{result.height} · {IMAGE_MODEL_LABEL}
-                    {result.inferenceSeconds !== null
-                      ? ` · ${result.inferenceSeconds.toFixed(1)}s`
+                    {run.width}×{run.height} · {runSpec?.label ?? run.model} ·{' '}
+                    {IMAGE_PROVIDER_LABELS[runSpec?.provider ?? 'workers-ai']}
+                    {run.inferenceSeconds !== null
+                      ? ` · ${run.inferenceSeconds.toFixed(1)}s`
                       : ''}
                   </span>
+                  {run.providerCreditCost !== null ? (
+                    <span>Provider-reported cost: {run.providerCreditCost} API credits</span>
+                  ) : null}
+                  {run.error ? (
+                    <span className="field-error" role="alert">
+                      {run.error}
+                    </span>
+                  ) : null}
                   <div className="media-actions">
-                    <button
-                      type="button"
-                      className="btn btn-small btn-primary"
-                      disabled={busy || scene?.locks.visuals}
-                      onClick={() => requestAttach(result)}
-                    >
-                      {scene?.imageAssetId ? 'Replace attached image' : 'Attach to scene'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-small"
-                      disabled={busy}
-                      onClick={() => discard(result)}
-                    >
-                      Discard
-                    </button>
+                    {run.status === 'completed' && run.preview ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-small btn-primary"
+                          disabled={busy || scene?.locks.visuals}
+                          onClick={() => requestAttach(run)}
+                        >
+                          {scene?.imageAssetId ? 'Replace attached image' : 'Attach to scene'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          disabled={busy}
+                          onClick={() => discard(run)}
+                        >
+                          Discard
+                        </button>
+                      </>
+                    ) : null}
+                    {!isTerminal(run.status) && runSpec?.lifecycle === 'async' ? (
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        disabled={busy}
+                        onClick={() => void cancel(run)}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                    {run.status === 'timed_out' ? (
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        onClick={() =>
+                          updateRun(run.jobId, () => ({
+                            status: 'queued',
+                            startedAt: Date.now(),
+                            error: null,
+                          }))
+                        }
+                      >
+                        Check again
+                      </button>
+                    ) : null}
+                    {isTerminal(run.status) && run.status !== 'completed' ? (
+                      <button
+                        type="button"
+                        className="btn btn-small"
+                        onClick={() => discard(run)}
+                      >
+                        Dismiss
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -495,9 +718,12 @@ function Generator({
       {confirmOpen ? (
         <Dialog
           title={`Generate ${selectedScenes.length} image${selectedScenes.length === 1 ? '' : 's'}?`}
-          description={`This spends one Workers AI generation per scene on ${IMAGE_PROVIDER_LABEL} (${IMAGE_MODEL_LABEL}). At the published list price that is about ${usd(
-            IMAGE_USD_ESTIMATE * selectedScenes.length,
-          )}, before your account's plan, its free daily allowance and taxes.`}
+          description={`This runs ${selectedScenes.length} paid generation${
+            selectedScenes.length === 1 ? '' : 's'
+          } on ${spec.label} through ${IMAGE_PROVIDER_LABELS[spec.provider]}. ${costLine(
+            spec,
+            selectedScenes.length,
+          )}`}
           onDismiss={() => setConfirmOpen(false)}
           actions={
             <>
@@ -513,7 +739,7 @@ function Generator({
           <ul className="plain-list">
             {selectedScenes.map((scene) => (
               <li key={scene.id}>
-                {scene.title || 'Untitled scene'} · {IMAGE_SIZE}×{IMAGE_SIZE} · {IMAGE_MODEL_LABEL}
+                {scene.title || 'Untitled scene'} · {spec.width}×{spec.height} · {spec.label}
               </li>
             ))}
           </ul>
