@@ -86,10 +86,15 @@ export async function decodeAudioFile(file: File): Promise<DecodedAudio> {
   }
 }
 
-/** Validate, decode, then store the original bytes under a stable audio id. */
+/**
+ * Validate, decode, then store the original bytes under a stable audio id. An
+ * upload that replaces narration passes the id it replaces, so the take it
+ * swapped out stays reachable and cleanup keeps it.
+ */
 export async function storeAudioFile(
   projectId: string,
   file: File,
+  replacesAssetId: string | null = null,
 ): Promise<AudioAssetRecord> {
   const decoded = await decodeAudioFile(file);
   const record: AudioAssetRecord = {
@@ -105,7 +110,7 @@ export async function storeAudioFile(
     blob: file,
     source: 'upload',
     generation: null,
-    replacesAssetId: null,
+    replacesAssetId,
   };
   await putAudioAsset(record);
   return record;

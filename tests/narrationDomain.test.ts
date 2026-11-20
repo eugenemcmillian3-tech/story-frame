@@ -9,7 +9,6 @@ import {
   narrationStatus,
 } from '../src/narration/plan';
 import {
-  NARRATION_MODEL,
   SAMPLE_MAX_CHARACTERS,
   buildSampleText,
   estimateNarrationUsd,
@@ -51,11 +50,6 @@ describe('narration provider facts', () => {
     expect(isNarrationVoice('aura-luna-en')).toBe(true);
     expect(isNarrationVoice('aura-angus-en')).toBe(true);
     expect(isNarrationVoice('not-a-voice')).toBe(false);
-  });
-
-  it('says what the model cannot do rather than pretending it can', () => {
-    expect(NARRATION_MODEL.supportsSpeakingRate).toBe(false);
-    expect(NARRATION_MODEL.supportsPronunciation).toBe(false);
   });
 
   it('cuts a sample at a word boundary', () => {

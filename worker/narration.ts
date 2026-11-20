@@ -1,16 +1,9 @@
 /**
- * Server-side narration generation through the one TTS provider this app
- * offers. Every endpoint, parameter and price is quoted from the provider's own
- * documentation, checked on 2026-11-20.
- *
- * Deepgram's REST API, with the deployment's own DEEPGRAM_API_KEY:
- * - POST https://api.deepgram.com/v1/speak?model=aura-luna-en with
- *   `authorization: Token {key}` and `{ text }` answers with the audio bytes and
- *   `content-type: audio/mpeg`; mp3 is the documented default encoding.
- * - Aura-1 voices use the model name `aura-{voice}-en`, so the chosen voice is
- *   the model id sent in the query string.
- * - $0.015 per 1k characters. The request is billed once it reaches the
- *   provider, so a failed or aborted call is still counted here.
+ * Server-side narration generation. The provider, its endpoint, the price and
+ * the voice ids live in `src/narration/provider.ts`, which the client shares, so
+ * both sides quote the same facts; this module adds only the credential, the
+ * retry policy and the D1 record. The request is billed once it reaches the
+ * provider, so a failed or aborted call is still counted here.
  *
  * The D1 row is both the quota unit and the job record: it is written before the
  * provider call, so a crash mid-call still leaves an auditable, billed job. A
@@ -80,8 +73,6 @@ export interface NarrationEnv {
   DEEPGRAM_API_BASE?: string;
 }
 
-/** One billed generation plus one retry at most. */
-const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 400;
 const PROVIDER_TIMEOUT_MS = 60_000;
 const DAILY_LIMIT = 20;
@@ -226,7 +217,12 @@ export interface NarrationUsage {
   usedToday: number;
   usedThisMinute: number;
   estimatedUsdToday: number;
-  jobs: NarrationJob[];
+}
+
+/** The only columns the usage counters read. */
+interface UsageRow {
+  estimated_usd: number;
+  created_at: string;
 }
 
 /** Reads today's spend without consuming anything, for the panel's display. */
@@ -235,28 +231,25 @@ export async function listNarrationUsage(
   userSub: string,
 ): Promise<NarrationUsage> {
   const now = new Date();
-  const dayStart = dayStartIso(now);
   const rows = await db
     .prepare(
-      `SELECT id, project_id, purpose, provider, model, voice, characters, estimated_usd,
-              script_fingerprint, status, attempts, provider_status, error, created_at, updated_at
+      `SELECT estimated_usd, created_at
          FROM narration_jobs
         WHERE user_sub = ?1 AND created_at >= ?2
         ORDER BY created_at DESC
-        LIMIT 20`,
+        LIMIT ${DAILY_LIMIT}`,
     )
-    .bind(userSub, dayStart)
-    .all<JobRow>();
-  const jobs = (rows.results ?? []).map(toJob);
+    .bind(userSub, dayStartIso(now))
+    .all<UsageRow>();
+  // The daily limit caps this list, so it already holds every billed request of the day.
+  const today = rows.results ?? [];
   const minuteStart = minuteStartIso(now);
   return {
     dailyLimit: DAILY_LIMIT,
     minuteLimit: MINUTE_LIMIT,
-    usedToday: jobs.length,
-    // The daily limit caps this list, so it already holds every billed job of the day.
-    usedThisMinute: jobs.filter((job) => job.createdAt >= minuteStart).length,
-    estimatedUsdToday: Number(jobs.reduce((total, job) => total + job.estimatedUsd, 0).toFixed(6)),
-    jobs,
+    usedToday: today.length,
+    usedThisMinute: today.filter((row) => row.created_at >= minuteStart).length,
+    estimatedUsdToday: Number(today.reduce((total, row) => total + row.estimated_usd, 0).toFixed(6)),
   };
 }
 

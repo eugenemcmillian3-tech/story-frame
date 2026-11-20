@@ -88,13 +88,19 @@ function AudioTrackField({
     setError(null);
     setBusy(true);
     try {
-      const stored = await storeAudioFile(project.id, file);
+      // Narration has a restore path in the narration panel, so an upload links
+      // back to the take it replaces and cleanup keeps that take reachable.
+      const stored = await storeAudioFile(
+        project.id,
+        file,
+        role === 'narration' ? track.assetId : null,
+      );
       const applied = store.mutate((current) =>
         updateAudioTrack(current, role, {
           assetId: stored.id,
           fileName: stored.name,
           durationMs: stored.durationMs,
-          // An upload replaces any generated take, so its provenance goes with it.
+          // The upload is not a generated take, so it carries no provenance.
           generated: null,
         }),
       );
@@ -161,7 +167,7 @@ function AudioTrackField({
     <fieldset className="field audio-track">
       <legend>{label}</legend>
       <p className="field-hint">
-        Optional. {role === 'narration' ? 'One uploaded narration file.' : 'One uploaded music file.'}{' '}
+        Optional. {role === 'narration' ? 'One narration file, uploaded or generated.' : 'One uploaded music file.'}{' '}
         Tested with 48 kHz stereo WAV. WAV, MP3, M4A, AAC, OGG, WebM, or FLAC are accepted when this
         browser can decode them, up to 25 MB and 10 minutes. Stored in this browser only.
       </p>
@@ -188,6 +194,12 @@ function AudioTrackField({
                 {track.generated.scriptFingerprint !== project.script.fingerprint
                   ? ' · the script has changed since, so this narration may be outdated'
                   : ''}
+              </span>
+            ) : null}
+            {role === 'narration' && record.replacesAssetId ? (
+              <span>
+                The narration this replaced is kept. Swap it back from Narration audio on the
+                script screen.
               </span>
             ) : null}
           </div>

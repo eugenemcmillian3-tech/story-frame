@@ -8,8 +8,7 @@
  *   bytes themselves; mp3 is the documented default encoding, so no `encoding`
  *   parameter is needed.
  * - Aura-1 English voices use the model name `aura-{voice}-en`, so the voice the
- *   user picks is also the model sent to the provider. `aura-asteria-en` is the
- *   documented default.
+ *   user picks is also the model sent to the provider.
  * - $0.015 per 1k characters of input text.
  * - The endpoint documents a `speed` multiplier, but this app sends none, so the
  *   same text always speaks at the voice's natural pace. There is no phoneme
@@ -33,8 +32,6 @@ export interface NarrationModelSpec {
   usdPerThousandCharacters: number;
   /** This app's own per-request cap; the provider documents none. */
   maxCharacters: number;
-  supportsSpeakingRate: boolean;
-  supportsPronunciation: boolean;
 }
 
 export const SAMPLE_MAX_CHARACTERS = 240;
@@ -65,8 +62,6 @@ export const NARRATION_MODEL: NarrationModelSpec = {
   defaultVoice: 'aura-angus-en',
   usdPerThousandCharacters: 0.015,
   maxCharacters: 5000,
-  supportsSpeakingRate: false,
-  supportsPronunciation: false,
 };
 
 export const NARRATION_CAPABILITY_NOTES = {

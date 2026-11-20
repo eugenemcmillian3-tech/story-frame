@@ -61,7 +61,7 @@ class FakeDb {
             ] as T[],
           };
         }
-        if (/^SELECT id, project_id, purpose/.test(flat)) {
+        if (/^SELECT estimated_usd, created_at/.test(flat)) {
           const [user, since] = params as string[];
           return {
             results: db.rows
@@ -301,7 +301,7 @@ describe('narration usage', () => {
     expect(usage.usedToday).toBe(1);
     expect(usage.usedThisMinute).toBe(1);
     expect(usage.estimatedUsdToday).toBeGreaterThan(0);
-    expect(usage.jobs[0].purpose).toBe('sample');
+    expect(db.rows[0].purpose).toBe('sample');
     expect(usage.dailyLimit).toBe(20);
   });
 });

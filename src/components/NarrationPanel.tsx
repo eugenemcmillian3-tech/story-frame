@@ -27,7 +27,7 @@ import {
 } from '../narration/plan';
 import { useStore } from '../state/StoreProvider';
 
-const PRICE_PERCENT = (NARRATION_MODEL.usdPerThousandCharacters * 100).toFixed(1);
+const PRICE_PER_THOUSAND = `$${NARRATION_MODEL.usdPerThousandCharacters.toFixed(3)}`;
 
 function usd(value: number): string {
   return value >= 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(4)}`;
@@ -374,7 +374,7 @@ function NarrationBody({ project }: { project: Project }) {
         </div>
 
         <p className="muted-small">
-          {NARRATION_MODEL.label} · {NARRATION_MODEL.voices.length} voices · ${PRICE_PERCENT} per 1k
+          {NARRATION_MODEL.label} · {NARRATION_MODEL.voices.length} voices · {PRICE_PER_THOUSAND} per 1k
           characters published list price. This script is {characters} characters, so one generation
           is about {usd(estimatedUsd)}. Every generation is a billed provider request: it cannot be
           cancelled once sent, and a failed attempt is still counted here.
@@ -416,25 +416,25 @@ function NarrationBody({ project }: { project: Project }) {
               Measured audio duration {track.durationMs === null ? 'not measured' : seconds(track.durationMs)}.
               {previous ? ' The take it replaced is still stored and can be swapped back in.' : ''}
             </p>
-            {previous ? (
-              <div className="row">
-                <button
-                  type="button"
-                  className="btn btn-small"
-                  disabled={busy}
-                  onClick={() => void restorePrevious()}
-                >
-                  Restore previous narration
-                </button>
-                <span className="muted-small">
-                  Kept from an earlier generation ({seconds(previous.durationMs)}).
-                </span>
-              </div>
-            ) : null}
           </div>
         ) : (
           <p className="muted-small">No generated narration attached yet.</p>
         )}
+
+        {/* Also shown for an uploaded narration, whose replaced take is still stored. */}
+        {previous ? (
+          <div className="row">
+            <button
+              type="button"
+              className="btn btn-small"
+              disabled={busy}
+              onClick={() => void restorePrevious()}
+            >
+              Restore previous narration
+            </button>
+            <span className="muted-small">Kept earlier take ({seconds(previous.durationMs)}).</span>
+          </div>
+        ) : null}
 
         {timing ? (
           <div className="stack">
