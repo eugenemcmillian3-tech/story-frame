@@ -101,8 +101,27 @@ export async function pickAvcCodec(
   );
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Yield to the event loop without a timer. A hidden tab clamps chained
+ * `setTimeout` callbacks to once per second, and once per minute after five
+ * minutes, so a timer-based yield stalls an encode the user has switched away
+ * from. Message events are not throttled that way, so the encoder's own
+ * callbacks keep running and the frame loop keeps advancing.
+ */
+const yieldChannel = typeof MessageChannel === 'undefined' ? null : new MessageChannel();
+const yieldQueue: Array<() => void> = [];
+if (yieldChannel) {
+  yieldChannel.port1.onmessage = () => {
+    yieldQueue.shift()?.();
+  };
+}
+
+function yieldToMain(): Promise<void> {
+  if (!yieldChannel) return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => {
+    yieldQueue.push(resolve);
+    yieldChannel.port2.postMessage(null);
+  });
 }
 
 function createCanvas(width: number, height: number): {
@@ -187,7 +206,7 @@ async function encodeAudioTrack(
       encoder.encode(audioData);
       audioData.close();
       while (encoder.encodeQueueSize > 4) {
-        await delay(2);
+        await yieldToMain();
         if (signal?.aborted) throw new RenderCanceledError();
         if (encoderError) throw encoderError;
       }
@@ -289,14 +308,14 @@ export async function encodeSilentMp4(options: SilentMp4Options): Promise<Silent
       frame.close();
 
       while (encoder.encodeQueueSize > 6) {
-        await delay(2);
+        await yieldToMain();
         if (canceled) throw new RenderCanceledError();
         if (encoderError) throw encoderError;
       }
 
       if (index % 5 === 0) {
         onProgress?.(index + 1, totalFrames);
-        await delay(0);
+        await yieldToMain();
       }
     }
 
