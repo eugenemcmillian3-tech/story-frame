@@ -7,10 +7,7 @@
  * POST /api/ai/plan, then one real Ollama call. It exercises our route, quota
  * and provider code; it is not a substitute for signing in to the deployed site.
  *
- * Run:
- *   npm run build:worker
- *   npx esbuild scripts/local-route-check.ts --bundle --format=esm --platform=node \
- *     --target=node20 --outfile=/tmp/local-route.mjs && node /tmp/local-route.mjs
+ * Run: npm run check:route
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -38,26 +35,28 @@ interface PendingCode {
 const codes = new Map<string, PendingCode>();
 
 async function sign(
+  sub: string,
   payload: Record<string, unknown>,
-  options: { type?: string } = {},
+  type?: string,
 ): Promise<string> {
-  const jwt = new SignJWT(payload)
-    .setProtectedHeader({ alg: 'RS256', kid: KEY_ID, ...(options.type ? { typ: options.type } : {}) })
+  return new SignJWT(payload)
+    .setProtectedHeader({ alg: 'RS256', kid: KEY_ID, ...(type ? { typ: type } : {}) })
     .setIssuer(ISSUER)
     .setAudience(CLIENT_ID)
+    .setSubject(sub)
     .setIssuedAt()
-    .setExpirationTime('1h');
-  if (typeof payload.sub === 'string') jwt.setSubject(payload.sub);
-  return jwt.sign(privateKey);
+    .setExpirationTime('1h')
+    .sign(privateKey);
 }
 
 async function issueTokens(nonce: string) {
   const claims = { email: 'local@example.test', email_verified: true, name: 'Local Check' };
   const accessToken = await sign(
-    { sub: USER_SUB, client_id: CLIENT_ID, ...claims },
-    { type: 'at+jwt' },
+    USER_SUB,
+    { client_id: CLIENT_ID, ...claims },
+    'at+jwt',
   );
-  const idToken = await sign({ sub: USER_SUB, nonce, ...claims });
+  const idToken = await sign(USER_SUB, { nonce, ...claims });
   return {
     access_token: accessToken,
     id_token: idToken,
@@ -67,14 +66,11 @@ async function issueTokens(nonce: string) {
   };
 }
 
-const html = (status: number, body: unknown) =>
-  JSON.stringify(body);
-
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? '/', `http://127.0.0.1:${SERVER_PORT}`);
   const send = (status: number, body: unknown) => {
     response.writeHead(status, { 'content-type': 'application/json' });
-    response.end(html(status, body));
+    response.end(JSON.stringify(body));
   };
   if (url.pathname === '/oidc/.well-known/openid-configuration') {
     send(200, {
@@ -115,10 +111,6 @@ const server = createServer((request, response) => {
     request.on('end', () => {
       void (async () => {
         const form = new URLSearchParams(body);
-        if (form.get('grant_type') === 'refresh_token') {
-          send(200, await issueTokens(''));
-          return;
-        }
         const pending = codes.get(form.get('code') ?? '');
         if (!pending) {
           send(400, { error: 'invalid_grant' });
@@ -146,10 +138,9 @@ const server = createServer((request, response) => {
 
 await new Promise<void>((resolve) => server.listen(SERVER_PORT, '127.0.0.1', resolve));
 
-// In-memory stand-in for D1 covering the two statements the quota code issues.
-function fakeDb(seed: Array<[string, string, number]> = []) {
+// In-memory stand-in for D1 covering the statements the quota code issues.
+function fakeDb() {
   const rows = new Map<string, number>();
-  for (const [sub, key, count] of seed) rows.set(`${sub}|${key}`, count);
   return {
     rows,
     prepare(query: string) {
@@ -213,12 +204,10 @@ function storeCookies(headers: Headers): void {
 
 async function call(
   path: string,
-  options: { method?: string; body?: unknown; origin?: string | null } = {},
+  options: { method?: string; body?: unknown; origin?: string } = {},
 ) {
-  const headers = new Headers();
+  const headers = new Headers({ origin: options.origin ?? APP_ORIGIN });
   if (options.body !== undefined) headers.set('content-type', 'application/json');
-  const origin = options.origin === undefined ? APP_ORIGIN : options.origin;
-  if (origin) headers.set('origin', origin);
   const cookie = cookieHeader();
   if (cookie) headers.set('cookie', cookie);
   const response = await worker.fetch(
@@ -285,7 +274,7 @@ await signin.text();
 const authorize = await fetch(authorizeUrl, { redirect: 'manual' });
 const callbackUrl = authorize.headers.get('location') ?? '';
 check(
-  'issuer returns a code bound to PKCE',
+  'issuer redirects back with a code and iss',
   authorize.status === 302 && callbackUrl.includes('code=') && callbackUrl.includes('iss='),
   `status ${authorize.status}`,
 );
@@ -323,7 +312,7 @@ check(
 db.rows.set(`${USER_SUB}|d:${day}`, 40);
 const limited = await call('/api/ai/plan', { method: 'POST', body: anglesPayload });
 const limitedBody = (await limited.json()) as { error?: string };
-check('daily limit returns 429', limited.status === 429, `${limited.status} ${limitedBody.error ?? ''}`);
+  check('daily limit is enforced', limited.status === 429, `${limited.status} ${limitedBody.error ?? ''}`);
 
 const signout = await call('/auth/freebuff/signout', { method: 'POST' });
 check('sign-out completes', signout.status === 303, `status ${signout.status}`);
