@@ -108,16 +108,13 @@ export async function pickAvcCodec(
  * from. Message events are not throttled that way, so the encoder's own
  * callbacks keep running and the frame loop keeps advancing.
  */
-const yieldChannel = typeof MessageChannel === 'undefined' ? null : new MessageChannel();
+const yieldChannel = new MessageChannel();
 const yieldQueue: Array<() => void> = [];
-if (yieldChannel) {
-  yieldChannel.port1.onmessage = () => {
-    yieldQueue.shift()?.();
-  };
-}
+yieldChannel.port1.onmessage = () => {
+  yieldQueue.shift()?.();
+};
 
 function yieldToMain(): Promise<void> {
-  if (!yieldChannel) return new Promise((resolve) => setTimeout(resolve, 0));
   return new Promise((resolve) => {
     yieldQueue.push(resolve);
     yieldChannel.port2.postMessage(null);
