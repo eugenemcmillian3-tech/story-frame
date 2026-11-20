@@ -310,7 +310,7 @@ function NarrationBody({ project }: { project: Project }) {
   return (
     <Panel
       title="Narration audio"
-      description="Speak the saved script with one provider voice. Generating never rewrites the script."
+      description="Speak the saved script with one provider voice, as a single take for the whole script. Generating never rewrites the script."
     >
       {error ? (
         <p className="notice" role="alert">
