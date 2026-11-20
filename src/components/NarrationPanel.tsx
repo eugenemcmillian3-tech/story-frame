@@ -7,7 +7,7 @@ import { newId } from '../domain/ids';
 import { updateAudioTrack } from '../domain/project';
 import type { NarrationTake, Project } from '../domain/types';
 import { formatTimestamp } from '../format';
-import { storeGeneratedNarration } from '../media/audioAssets';
+import { linkAudioAssetReplacement, storeGeneratedNarration } from '../media/audioAssets';
 import { cleanupProjectMedia } from '../media/cleanup';
 import { deleteAudioAsset, getAudioAsset } from '../media/mediaDb';
 import type { AudioAssetRecord } from '../media/mediaDb';
@@ -35,6 +35,10 @@ function usd(value: number): string {
 
 function seconds(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
+}
+
+function reasonMessage(reason: unknown, fallback: string): string {
+  return reason instanceof Error ? reason.message : fallback;
 }
 
 /**
@@ -78,22 +82,16 @@ function SignedIn({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-type PendingAction =
-  | { kind: 'sample' }
-  | { kind: 'narration' }
-  | { kind: 'regenerate' }
-  | { kind: 'fit' }
-  | null;
+type PendingKind = 'sample' | 'generate' | 'fit';
 
 function NarrationBody({ project }: { project: Project }) {
   const store = useStore();
   const track = project.audio.narration;
-  const scenes = project.storyboard.scenes;
   const scriptText = project.script.narration;
   const take = track.generated ?? null;
   const status = narrationStatus(take, project.script.fingerprint);
   const [voice, setVoice] = useState(take?.voice ?? NARRATION_MODEL.defaultVoice);
-  const [pending, setPending] = useState<PendingAction>(null);
+  const [pending, setPending] = useState<PendingKind | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,10 +102,6 @@ function NarrationBody({ project }: { project: Project }) {
   const sampleRef = useRef<HTMLAudioElement>(null);
   const sampleUrlRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    sampleUrlRef.current = sampleUrl;
-  }, [sampleUrl]);
-
   useEffect(
     () => () => {
       if (sampleUrlRef.current) URL.revokeObjectURL(sampleUrlRef.current);
@@ -115,42 +109,39 @@ function NarrationBody({ project }: { project: Project }) {
     [],
   );
 
+  // The take the current one replaced, which restore can swap back in.
   useEffect(() => {
     let active = true;
     setPrevious(null);
-    if (!track.assetId) return;
-    getAudioAsset(track.assetId)
-      .then(async (current) => {
-        const replaced = current?.replacesAssetId;
-        if (!replaced) return null;
-        return getAudioAsset(replaced);
-      })
-      .then((found) => {
-        if (active) setPrevious(found ?? null);
-      })
-      .catch(() => {
+    const currentId = track.assetId;
+    if (!currentId) return;
+    void (async () => {
+      try {
+        const current = await getAudioAsset(currentId);
+        const replacedId = current?.replacesAssetId ?? null;
+        const kept = replacedId ? await getAudioAsset(replacedId) : undefined;
+        if (active) setPrevious(kept ?? null);
+      } catch {
         if (active) setPrevious(null);
-      });
+      }
+    })();
     return () => {
       active = false;
     };
   }, [track.assetId]);
 
+  const refreshUsage = async () => {
+    try {
+      setUsage(await getNarrationUsage());
+      setUsageError(null);
+    } catch (reason) {
+      setUsageError(reasonMessage(reason, 'Usage could not be loaded.'));
+    }
+  };
+
   useEffect(() => {
-    let active = true;
-    getNarrationUsage()
-      .then((value) => {
-        if (!active) return;
-        setUsage(value);
-        setUsageError(null);
-      })
-      .catch((reason: unknown) => {
-        if (!active) return;
-        setUsageError(reason instanceof Error ? reason.message : 'Usage could not be loaded.');
-      });
-    return () => {
-      active = false;
-    };
+    void refreshUsage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount
   }, []);
 
   const characters = scriptText.length;
@@ -158,21 +149,14 @@ function NarrationBody({ project }: { project: Project }) {
   const sampleText = buildSampleText(scriptText);
   const sampleUsd = estimateNarrationUsd(sampleText.length);
   const timing = track.durationMs === null ? null : compareNarrationToScenes(project, track.durationMs);
-
-  const refreshUsage = async () => {
-    try {
-      setUsage(await getNarrationUsage());
-      setUsageError(null);
-    } catch (reason) {
-      setUsageError(reason instanceof Error ? reason.message : 'Usage could not be loaded.');
-    }
-  };
+  const timingOff = timing !== null && Math.abs(timing.deltaMs) >= 500;
 
   /**
    * Speaks the saved script exactly. The store is flushed first so the audio and
    * the recorded fingerprint both describe the same, persisted text.
    */
-  const runGeneration = async (purpose: 'sample' | 'narration') => {
+  const runGeneration = async (kind: 'sample' | 'generate') => {
+    const purpose = kind === 'sample' ? 'sample' : 'narration';
     setPending(null);
     setError(null);
     setNotice(null);
@@ -255,15 +239,30 @@ function NarrationBody({ project }: { project: Project }) {
       void cleanupProjectMedia(store).catch(() => undefined);
       await refreshUsage();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Narration could not be generated.');
+      setError(reasonMessage(reason, 'Narration could not be generated.'));
     } finally {
       setBusy(false);
     }
   };
 
-  const restorePrevious = () => {
+  /**
+   * Swaps the kept take back in. The take being swapped out becomes the restored
+   * take's replacement, so the button keeps working in both directions instead
+   * of hiding the newer narration for good.
+   */
+  const restorePrevious = async () => {
     if (!previous) return;
     setError(null);
+    setNotice(null);
+    const replacedId = track.assetId;
+    try {
+      if (replacedId && replacedId !== previous.id) {
+        await linkAudioAssetReplacement(previous.id, replacedId);
+      }
+    } catch (reason) {
+      setError(reasonMessage(reason, 'The previous narration could not be swapped in.'));
+      return;
+    }
     const applied = store.mutate((current) =>
       updateAudioTrack(current, 'narration', {
         assetId: previous.id,
@@ -277,7 +276,9 @@ function NarrationBody({ project }: { project: Project }) {
       setError(applied.message ?? 'The previous narration could not be restored.');
       return;
     }
-    setNotice('Restored the previous narration.');
+    setNotice(
+      `Restored the ${seconds(previous.durationMs)} take. The one it replaced is now the previous take.`,
+    );
   };
 
   const fitTiming = () => {
@@ -300,12 +301,26 @@ function NarrationBody({ project }: { project: Project }) {
     );
   };
 
-  const pendingText =
-    pending?.kind === 'sample'
-      ? `This sends the first ${sampleText.length} characters of the saved script to ${NARRATION_MODEL.label} with the ${narrationVoiceLabel(voice)} voice, for about ${usd(sampleUsd)} at the published list price. The sample is played, not attached to the project.`
-      : pending?.kind === 'fit' && timing
-        ? `${timing.unlockedScenes} scene${timing.unlockedScenes === 1 ? '' : 's'} without a timing lock will be rescaled to total ${seconds(timing.measuredMs)}. ${timing.lockedScenes} locked scene${timing.lockedScenes === 1 ? '' : 's'} keep their exact planned duration.`
-        : `This sends ${characters} characters of the saved script to ${NARRATION_MODEL.label} with the ${narrationVoiceLabel(voice)} voice, for about ${usd(estimatedUsd)} at the published list price (before allowances, plan and tax). The previous narration is kept until you replace it.`;
+  const dialogCopy = (kind: PendingKind): { title: string; description: string } => {
+    if (kind === 'sample') {
+      return {
+        title: 'Generate a sample?',
+        description: `This sends the first ${sampleText.length} characters of the saved script to ${NARRATION_MODEL.label} with the ${narrationVoiceLabel(voice)} voice, for about ${usd(sampleUsd)} at the published list price. The sample is played, not attached to the project.`,
+      };
+    }
+    if (kind === 'fit' && timing) {
+      return {
+        title: 'Fit scene durations to the narration?',
+        description: `${timing.unlockedScenes} scene${timing.unlockedScenes === 1 ? '' : 's'} without a timing lock will be rescaled to total ${seconds(timing.measuredMs)}. ${timing.lockedScenes} locked scene${timing.lockedScenes === 1 ? '' : 's'} keep their exact planned duration.`,
+      };
+    }
+    return {
+      title: status === 'current' ? 'Generate narration again?' : 'Generate narration?',
+      description: `This sends ${characters} characters of the saved script to ${NARRATION_MODEL.label} with the ${narrationVoiceLabel(voice)} voice, for about ${usd(estimatedUsd)} at the published list price (before allowances, plan and tax). The previous narration is kept until you replace it.`,
+    };
+  };
+
+  const copy = pending ? dialogCopy(pending) : null;
 
   return (
     <Panel
@@ -343,7 +358,7 @@ function NarrationBody({ project }: { project: Project }) {
               type="button"
               className="btn btn-small"
               disabled={busy || sampleText.trim() === ''}
-              onClick={() => setPending({ kind: 'sample' })}
+              onClick={() => setPending('sample')}
             >
               Preview sample
             </button>
@@ -351,7 +366,7 @@ function NarrationBody({ project }: { project: Project }) {
               type="button"
               className="btn btn-primary"
               disabled={busy || scriptText.trim() === ''}
-              onClick={() => setPending({ kind: status === 'current' ? 'regenerate' : 'narration' })}
+              onClick={() => setPending('generate')}
             >
               {status === 'none' ? 'Generate narration' : 'Generate new narration'}
             </button>
@@ -399,11 +414,16 @@ function NarrationBody({ project }: { project: Project }) {
             ) : null}
             <p className="muted-small">
               Measured audio duration {track.durationMs === null ? 'not measured' : seconds(track.durationMs)}.
-              {previous ? ' The take it replaced is still stored and can be restored.' : ''}
+              {previous ? ' The take it replaced is still stored and can be swapped back in.' : ''}
             </p>
             {previous ? (
               <div className="row">
-                <button type="button" className="btn btn-small" disabled={busy} onClick={restorePrevious}>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  disabled={busy}
+                  onClick={() => void restorePrevious()}
+                >
                   Restore previous narration
                 </button>
                 <span className="muted-small">
@@ -425,39 +445,39 @@ function NarrationBody({ project }: { project: Project }) {
               {(timing.deltaMs / 1000).toFixed(2)} s). {timing.lockedScenes} scene
               {timing.lockedScenes === 1 ? '' : 's'} locked, {timing.unlockedScenes} unlocked.
             </p>
-            {Math.abs(timing.deltaMs) >= 500 ? (
-              <div className="row">
-                <button
-                  type="button"
-                  className="btn btn-small"
-                  onClick={() => document.getElementById('script-narration')?.focus()}
-                >
-                  Edit the script
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-small"
-                  disabled={busy}
-                  onClick={() => setPending({ kind: 'regenerate' })}
-                >
-                  Regenerate from the saved script
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-small"
-                  disabled={busy || timing.unlockedScenes === 0}
-                  onClick={() => setPending({ kind: 'fit' })}
-                >
-                  Fit unlocked scene durations
-                </button>
-              </div>
-            ) : null}
-            {Math.abs(timing.deltaMs) >= 500 ? (
-              <p className="muted-small">
-                Regenerating speaks the same text again, so its length will not change: the provider
-                offers no speaking-rate setting. Editing the script is the only way to shorten or
-                lengthen the narration.
-              </p>
+            {timingOff ? (
+              <>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    onClick={() => document.getElementById('script-narration')?.focus()}
+                  >
+                    Edit the script
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    disabled={busy}
+                    onClick={() => setPending('generate')}
+                  >
+                    Regenerate from the saved script
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    disabled={busy || timing.unlockedScenes === 0}
+                    onClick={() => setPending('fit')}
+                  >
+                    Fit unlocked scene durations
+                  </button>
+                </div>
+                <p className="muted-small">
+                  Regenerating speaks the same text again, so its length will not change: the
+                  provider offers no speaking-rate setting. Editing the script is the only way to
+                  shorten or lengthen the narration.
+                </p>
+              </>
             ) : null}
           </div>
         ) : null}
@@ -472,16 +492,10 @@ function NarrationBody({ project }: { project: Project }) {
         {usageError ? <p className="muted-small">{usageError}</p> : null}
       </div>
 
-      {pending ? (
+      {pending && copy ? (
         <Dialog
-          title={
-            pending.kind === 'sample'
-              ? 'Generate a sample?'
-              : pending.kind === 'fit'
-                ? 'Fit scene durations to the narration?'
-                : 'Generate narration?'
-          }
-          description={pendingText}
+          title={copy.title}
+          description={copy.description}
           onDismiss={() => setPending(null)}
           actions={
             <>
@@ -492,11 +506,11 @@ function NarrationBody({ project }: { project: Project }) {
                 type="button"
                 className="btn btn-primary"
                 onClick={() => {
-                  if (pending.kind === 'fit') fitTiming();
-                  else void runGeneration(pending.kind === 'sample' ? 'sample' : 'narration');
+                  if (pending === 'fit') fitTiming();
+                  else void runGeneration(pending);
                 }}
               >
-                {pending.kind === 'fit' ? 'Adjust unlocked scenes' : 'Generate'}
+                {pending === 'fit' ? 'Adjust unlocked scenes' : 'Generate'}
               </button>
             </>
           }
@@ -505,4 +519,3 @@ function NarrationBody({ project }: { project: Project }) {
     </Panel>
   );
 }
-

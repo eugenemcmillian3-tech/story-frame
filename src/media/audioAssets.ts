@@ -1,6 +1,6 @@
 import { newId } from '../domain/ids';
 import type { NarrationTake } from '../domain/types';
-import { putAudioAsset } from './mediaDb';
+import { getAudioAsset, putAudioAsset } from './mediaDb';
 import type { AudioAssetRecord } from './mediaDb';
 
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
@@ -109,6 +109,20 @@ export async function storeAudioFile(
   };
   await putAudioAsset(record);
   return record;
+}
+
+/**
+ * Point an existing take at the one it now replaces. Restoring an older
+ * narration uses this so the take being swapped out stays reachable from the
+ * restored one, and the two can be swapped again later.
+ */
+export async function linkAudioAssetReplacement(
+  assetId: string,
+  replacesAssetId: string,
+): Promise<void> {
+  const record = await getAudioAsset(assetId);
+  if (!record) throw new Error('That narration is no longer stored in this browser.');
+  await putAudioAsset({ ...record, replacesAssetId });
 }
 
 /**

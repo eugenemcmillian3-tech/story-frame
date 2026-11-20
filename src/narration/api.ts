@@ -1,6 +1,6 @@
-import type { NarrationJobStatus, NarrationPurpose } from '../../worker/narration';
+import type { NarrationPurpose } from '../../worker/narration';
 
-export type { NarrationJobStatus, NarrationPurpose };
+export type { NarrationPurpose };
 
 export interface GenerateNarrationInput {
   id: string;
@@ -18,18 +18,6 @@ export interface GeneratedNarration {
   voice: string;
   characters: number;
   estimatedUsd: number;
-  attempts: number;
-}
-
-export interface NarrationUsageJob {
-  id: string;
-  status: NarrationJobStatus;
-  voice: string;
-  characters: number;
-  estimatedUsd: number;
-  purpose: NarrationPurpose;
-  createdAt: string;
-  error: string | null;
 }
 
 export interface NarrationUsageView {
@@ -38,7 +26,6 @@ export interface NarrationUsageView {
   usedToday: number;
   usedThisMinute: number;
   estimatedUsdToday: number;
-  jobs: NarrationUsageJob[];
 }
 
 const STATUS_MESSAGES: Record<number, string> = {
@@ -104,7 +91,6 @@ export async function generateNarration(
     voice: response.headers.get('X-Narration-Voice') ?? input.voice,
     characters: characters ?? input.text.length,
     estimatedUsd: estimatedUsd ?? 0,
-    attempts: numberHeader(response, 'X-Narration-Attempts') ?? 1,
   };
 }
 

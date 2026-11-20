@@ -102,6 +102,27 @@ describe('narration timing', () => {
     expect(total).toBe(90);
   });
 
+  it('keeps every unlocked scene at least a second when the narration is short', () => {
+    let project = board();
+    const [first, second, third] = project.storyboard.scenes;
+    project = updateScene(project, first.id, { plannedDuration: 1 }, NOW);
+    project = updateScene(project, second.id, { plannedDuration: 1 }, NOW);
+    project = updateScene(project, third.id, { plannedDuration: 98 }, NOW);
+    const { project: fitted } = fitUnlockedSceneDurations(project, 5_000, NOW);
+    const total = fitted.storyboard.scenes.reduce((sum, scene) => sum + scene.plannedDuration, 0);
+    expect(total).toBe(5);
+    expect(fitted.storyboard.scenes.every((scene) => scene.plannedDuration >= 1)).toBe(true);
+  });
+
+  it('splits evenly when the unlocked scenes have no length to scale', () => {
+    let project = board();
+    for (const scene of project.storyboard.scenes) {
+      project = updateScene(project, scene.id, { plannedDuration: 0 }, NOW);
+    }
+    const { project: fitted } = fitUnlockedSceneDurations(project, 9_000, NOW);
+    expect(fitted.storyboard.scenes.map((scene) => scene.plannedDuration)).toEqual([3, 3, 3]);
+  });
+
   it('refuses when every scene is locked', () => {
     let project = board();
     for (const scene of project.storyboard.scenes) {

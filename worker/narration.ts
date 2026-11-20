@@ -187,7 +187,8 @@ export function parseNarrationRequest(body: unknown): NarrationRequest {
   if (!isNarrationVoice(voice)) {
     throw new NarrationError(400, 'That voice is not one the provider offers.');
   }
-  const purpose = raw.purpose === 'sample' ? 'sample' : raw.purpose === 'narration' ? 'narration' : null;
+  const purpose =
+    raw.purpose === 'sample' || raw.purpose === 'narration' ? raw.purpose : null;
   if (purpose === null) {
     throw new NarrationError(400, 'The narration request needs a purpose of narration or sample.');
   }
@@ -247,11 +248,13 @@ export async function listNarrationUsage(
     .bind(userSub, dayStart)
     .all<JobRow>();
   const jobs = (rows.results ?? []).map(toJob);
+  const minuteStart = minuteStartIso(now);
   return {
     dailyLimit: DAILY_LIMIT,
     minuteLimit: MINUTE_LIMIT,
     usedToday: jobs.length,
-    usedThisMinute: await countSince(db, userSub, minuteStartIso(now)),
+    // The daily limit caps this list, so it already holds every billed job of the day.
+    usedThisMinute: jobs.filter((job) => job.createdAt >= minuteStart).length,
     estimatedUsdToday: Number(jobs.reduce((total, job) => total + job.estimatedUsd, 0).toFixed(6)),
     jobs,
   };
@@ -268,70 +271,101 @@ interface ProviderResult {
   providerStatus: number;
 }
 
+const UNREACHABLE =
+  'The text-to-speech provider could not be reached. The request may still be billed; check the usage list before retrying.';
+const MAYBE_BILLED = ' The provider may have billed this attempt.';
+
+type SpeechAttempt =
+  | { ok: true; result: ProviderResult }
+  | { ok: false; retryable: boolean; error: NarrationError };
+
 /**
- * One provider call, retried at most once and only when the failure is one the
- * provider itself is unlikely to have billed: a transport error or a 429/5xx.
- * A 4xx answer is returned immediately because retrying it cannot help.
+ * One provider call. Only a transport error or a 429/5xx is worth repeating; a
+ * 4xx answer is final because retrying it cannot help.
  */
-async function callProvider(env: NarrationEnv, text: string, voice: string): Promise<ProviderResult> {
+async function attemptSpeech(
+  env: NarrationEnv,
+  text: string,
+  voice: string,
+  attempt: number,
+): Promise<SpeechAttempt> {
   const root = (env.CF_AI_BASE || DEFAULT_CF_AI_ROOT).replace(/\/+$/, '');
   const url = `${root}/accounts/${env.CF_ACCOUNT_ID}/ai/run/${NARRATION_MODEL.model}`;
-  let lastError: NarrationError = new NarrationError(502, 'The text-to-speech provider did not respond.');
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${env.CF_API_TOKEN}`,
-          'content-type': 'application/json',
-          accept: 'audio/mpeg',
-        },
-        body: JSON.stringify({ text, speaker: voice, encoding: 'mp3' }),
-        signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
-      });
-    } catch {
-      lastError = new NarrationError(
-        502,
-        'The text-to-speech provider could not be reached. The request may still be billed; check the usage list before retrying.',
-      );
-      if (attempt < MAX_ATTEMPTS) {
-        await sleep(RETRY_DELAY_MS);
-        continue;
-      }
-      throw lastError;
-    }
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.CF_API_TOKEN}`,
+        'content-type': 'application/json',
+        accept: 'audio/mpeg',
+      },
+      body: JSON.stringify({ text, speaker: voice, encoding: 'mp3' }),
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, retryable: true, error: new NarrationError(502, UNREACHABLE) };
+  }
 
-    if (response.ok) {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength === 0) {
-        throw new NarrationError(502, 'The provider returned empty audio. Nothing was saved.');
-      }
-      return {
-        bytes,
-        mimeType: response.headers.get('content-type') || 'audio/mpeg',
-        attempts: attempt,
-        providerStatus: response.status,
-      };
-    }
-
-    const retryable = response.status === 429 || response.status >= 500;
-    if (response.status === 401 || response.status === 403) {
-      throw new NarrationError(
+  if (response.status === 401 || response.status === 403) {
+    return {
+      ok: false,
+      retryable: false,
+      error: new NarrationError(
         503,
         'The deployment’s text-to-speech credentials were refused. Check CF_ACCOUNT_ID and CF_API_TOKEN in Sites → Secrets.',
-      );
-    }
-    lastError =
-      response.status === 429
-        ? new NarrationError(429, 'The text-to-speech provider is rate limiting this account. Try again shortly.')
-        : new NarrationError(502, `The text-to-speech provider refused the request (HTTP ${response.status}).`);
-    if (!retryable || attempt === MAX_ATTEMPTS) {
-      throw new NarrationError(lastError.status, `${lastError.message} The provider may have billed this attempt.`);
-    }
-    await sleep(RETRY_DELAY_MS);
+      ),
+    };
   }
-  throw lastError;
+  if (!response.ok) {
+    return {
+      ok: false,
+      retryable: response.status === 429 || response.status >= 500,
+      error:
+        response.status === 429
+          ? new NarrationError(
+              429,
+              `The text-to-speech provider is rate limiting this account. Try again shortly.${MAYBE_BILLED}`,
+            )
+          : new NarrationError(
+              502,
+              `The text-to-speech provider refused the request (HTTP ${response.status}).${MAYBE_BILLED}`,
+            ),
+    };
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return {
+      ok: false,
+      retryable: false,
+      error: new NarrationError(502, 'The provider returned empty audio. Nothing was saved.'),
+    };
+  }
+  return {
+    ok: true,
+    result: {
+      bytes,
+      mimeType: response.headers.get('content-type') || 'audio/mpeg',
+      attempts: attempt,
+      providerStatus: response.status,
+    },
+  };
+}
+
+/** One billed generation, retried at most once. */
+async function callProvider(
+  env: NarrationEnv,
+  text: string,
+  voice: string,
+): Promise<ProviderResult> {
+  const first = await attemptSpeech(env, text, voice, 1);
+  if (first.ok) return first.result;
+  if (!first.retryable) throw first.error;
+  await sleep(RETRY_DELAY_MS);
+  const second = await attemptSpeech(env, text, voice, 2);
+  if (second.ok) return second.result;
+  throw second.error;
 }
 
 /**
@@ -380,6 +414,24 @@ export async function generateNarration(
   const characters = request.text.length;
   const estimatedUsd = estimateNarrationUsd(characters);
   const createdAt = now.toISOString();
+  // One row describes the job for the insert, the response and the usage list.
+  const row: JobRow = {
+    id: request.id,
+    project_id: request.projectId,
+    purpose: request.purpose,
+    provider: NARRATION_MODEL.provider,
+    model: NARRATION_MODEL.model,
+    voice: request.voice,
+    characters,
+    estimated_usd: estimatedUsd,
+    script_fingerprint: request.scriptFingerprint,
+    status: 'generating',
+    attempts: 0,
+    provider_status: null,
+    error: null,
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
   await db
     .prepare(
       `INSERT INTO narration_jobs
@@ -388,17 +440,17 @@ export async function generateNarration(
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'generating', 0, NULL, NULL, ?11, ?11)`,
     )
     .bind(
-      request.id,
+      row.id,
       userSub,
-      request.projectId,
-      request.purpose,
-      NARRATION_MODEL.provider,
-      NARRATION_MODEL.model,
-      request.voice,
-      characters,
-      estimatedUsd,
-      request.scriptFingerprint,
-      createdAt,
+      row.project_id,
+      row.purpose,
+      row.provider,
+      row.model,
+      row.voice,
+      row.characters,
+      row.estimated_usd,
+      row.script_fingerprint,
+      row.created_at,
     )
     .run();
 
@@ -414,23 +466,13 @@ export async function generateNarration(
       .bind(request.id, userSub, result.attempts, result.providerStatus, updatedAt)
       .run();
     return {
-      job: {
-        id: request.id,
+      job: toJob({
+        ...row,
         status: 'completed',
-        provider: NARRATION_MODEL.provider,
-        model: NARRATION_MODEL.model,
-        voice: request.voice,
-        characters,
-        estimatedUsd,
-        scriptFingerprint: request.scriptFingerprint,
-        purpose: request.purpose,
-        projectId: request.projectId,
         attempts: result.attempts,
-        providerStatus: result.providerStatus,
-        error: null,
-        createdAt,
-        updatedAt,
-      },
+        provider_status: result.providerStatus,
+        updated_at: updatedAt,
+      }),
       bytes: result.bytes,
       mimeType: result.mimeType,
     };

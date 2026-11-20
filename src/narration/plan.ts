@@ -28,22 +28,28 @@ export function compareNarrationToScenes(
   project: Project,
   measuredMs: number,
 ): NarrationTiming {
-  const plannedMs =
-    project.storyboard.scenes.reduce((total, scene) => total + scene.plannedDuration, 0) * 1000;
+  let plannedSeconds = 0;
+  let lockedScenes = 0;
+  for (const scene of project.storyboard.scenes) {
+    plannedSeconds += scene.plannedDuration;
+    if (scene.locks.timing) lockedScenes += 1;
+  }
+  const plannedMs = plannedSeconds * 1000;
   return {
     measuredMs,
     plannedMs,
     deltaMs: measuredMs - plannedMs,
-    lockedScenes: project.storyboard.scenes.filter((scene) => scene.locks.timing).length,
-    unlockedScenes: project.storyboard.scenes.filter((scene) => !scene.locks.timing).length,
+    lockedScenes,
+    unlockedScenes: project.storyboard.scenes.length - lockedScenes,
   };
 }
 
 /**
  * Rescale unlocked scene durations so the storyboard matches the measured
- * narration. Locked scenes keep their exact planned duration; the rest share
- * what is left in proportion to their current lengths, rounded to whole seconds.
- * Throws instead of guessing when the locked timing leaves no room.
+ * narration. Locked scenes keep their exact planned duration; each unlocked
+ * scene keeps a one-second floor and the rest is shared in proportion to its
+ * current length, rounded to whole seconds. Throws instead of guessing when the
+ * locked timing leaves no room.
  */
 export function fitUnlockedSceneDurations(
   project: Project,
@@ -76,24 +82,26 @@ export function fitUnlockedSceneDurations(
     );
   }
 
+  const extraSeconds = availableSeconds - unlocked.length;
   const unlockedTotal = unlocked.reduce((total, scene) => total + scene.plannedDuration, 0);
-  const exact = unlocked.map((scene) => ({
-    sceneId: scene.id,
-    share: unlockedTotal > 0 ? availableSeconds * (scene.plannedDuration / unlockedTotal) : 0,
-  }));
-  const allotted = exact.map((entry) => ({
-    sceneId: entry.sceneId,
-    seconds: Math.max(1, Math.floor(entry.share)),
-    remainder: entry.share - Math.floor(entry.share),
-  }));
-  let leftover = availableSeconds - allotted.reduce((total, entry) => total + entry.seconds, 0);
-  const byRemainder = [...allotted].sort((a, b) => b.remainder - a.remainder);
+  const shares = unlocked.map((scene) => {
+    const fraction =
+      unlockedTotal > 0 ? scene.plannedDuration / unlockedTotal : 1 / unlocked.length;
+    const share = extraSeconds * fraction;
+    return { sceneId: scene.id, share, seconds: 1 + Math.floor(share) };
+  });
+
+  // Hand out the seconds lost to rounding, largest remainder first.
+  let leftover = extraSeconds - shares.reduce((total, entry) => total + Math.floor(entry.share), 0);
+  const byRemainder = [...shares].sort(
+    (a, b) => b.share - Math.floor(b.share) - (a.share - Math.floor(a.share)),
+  );
   for (let index = 0; leftover > 0; index += 1) {
     byRemainder[index % byRemainder.length].seconds += 1;
     leftover -= 1;
   }
 
-  const durations = new Map(allotted.map((entry) => [entry.sceneId, entry.seconds]));
+  const durations = new Map(shares.map((entry) => [entry.sceneId, entry.seconds]));
   let changedScenes = 0;
   const nextScenes = scenes.map((scene) => {
     const seconds = durations.get(scene.id);

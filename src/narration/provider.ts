@@ -15,9 +15,6 @@
  *   different text can change the pacing. No voice cloning exists here.
  */
 
-export type NarrationProviderId = 'deepgram';
-export type NarrationModelId = 'aura-1';
-
 export interface NarrationVoice {
   /** The provider's own speaker id, sent verbatim. */
   id: string;
@@ -26,12 +23,9 @@ export interface NarrationVoice {
 }
 
 export interface NarrationModelSpec {
-  id: NarrationModelId;
-  providerId: NarrationProviderId;
   provider: string;
   model: string;
   label: string;
-  language: string;
   voices: readonly NarrationVoice[];
   defaultVoice: string;
   usdPerThousandCharacters: number;
@@ -63,12 +57,9 @@ function voiceLabel(id: string): string {
 }
 
 export const NARRATION_MODEL: NarrationModelSpec = {
-  id: 'aura-1',
-  providerId: 'deepgram',
   provider: 'Deepgram Aura',
   model: '@cf/deepgram/aura-1',
   label: 'Deepgram Aura (Workers AI)',
-  language: 'en',
   voices: VOICE_IDS.map((id) => ({ id, label: voiceLabel(id) })),
   defaultVoice: 'angus',
   usdPerThousandCharacters: 0.015,

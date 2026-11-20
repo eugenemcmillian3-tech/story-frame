@@ -213,6 +213,33 @@ describe('narration generation', () => {
     expect(db.rows[0].error).toMatch(/HTTP 400/);
   });
 
+  it('retries a transport failure and says the request may be billed', async () => {
+    const db = new FakeDb();
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls += 1;
+      throw new TypeError('network down');
+    });
+    await expect(generateNarration(db, ENV, 'user_1', request())).rejects.toThrow(
+      /could not be reached.*may still be billed/i,
+    );
+    expect(calls).toBe(2);
+    expect(db.rows[0].status).toBe('failed');
+  });
+
+  it('does not retry refused credentials and points at the secrets', async () => {
+    const db = new FakeDb();
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls += 1;
+      return new Response('no', { status: 401 });
+    });
+    await expect(generateNarration(db, ENV, 'user_1', request())).rejects.toThrow(
+      /CF_ACCOUNT_ID and CF_API_TOKEN/,
+    );
+    expect(calls).toBe(1);
+  });
+
   it('refuses a repeated request id instead of billing twice', async () => {
     const db = new FakeDb();
     let calls = 0;
