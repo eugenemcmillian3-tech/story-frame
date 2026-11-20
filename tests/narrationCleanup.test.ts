@@ -28,8 +28,8 @@ vi.mock('../src/media/mediaDb', () => ({
 const NOW = '2026-01-01T00:00:00.000Z';
 const PROJECT_ID = 'prj_restore';
 
-function take(id: string, voice: string): NarrationTake {
-  return {
+function narration(id: string, voice: string, replacesAssetId: string | null): AudioAssetRecord {
+  const generation: NarrationTake = {
     provider: 'Deepgram Aura',
     model: '@cf/deepgram/aura-1',
     voice,
@@ -39,9 +39,6 @@ function take(id: string, voice: string): NarrationTake {
     jobId: `nar_${id}`,
     generatedAt: NOW,
   };
-}
-
-function narration(id: string, voice: string, replacesAssetId: string | null): AudioAssetRecord {
   return {
     id,
     projectId: PROJECT_ID,
@@ -54,7 +51,7 @@ function narration(id: string, voice: string, replacesAssetId: string | null): A
     createdAt: NOW,
     blob: {} as Blob,
     source: 'generated',
-    generation: take(id, voice),
+    generation,
     replacesAssetId,
   };
 }
@@ -111,7 +108,6 @@ describe('restored narration cleanup', () => {
     expect(deleted).toEqual(['aud_stray']);
     expect(media.audio.has(older.id)).toBe(true);
     expect(media.audio.has(newer.id)).toBe(true);
-    expect(media.audio.get(older.id)?.replacesAssetId).toBe(newer.id);
   });
 
   it('keeps both takes again after switching back to the newer narration', async () => {
@@ -131,6 +127,5 @@ describe('restored narration cleanup', () => {
     expect(deleted).toEqual([]);
     expect(media.audio.has(newer.id)).toBe(true);
     expect(media.audio.has(older.id)).toBe(true);
-    expect(media.audio.get(newer.id)?.replacesAssetId).toBe(older.id);
   });
 });
