@@ -11,7 +11,6 @@ export interface ImageJobView {
   settings: ImageJobSettings;
   sceneId: string;
   projectId: string;
-  providerJobId: string | null;
   width: number | null;
   height: number | null;
   inferenceSeconds: number | null;

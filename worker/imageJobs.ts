@@ -42,7 +42,6 @@ export type ImageJobStatus =
 
 /** A D1 row is limited to 2 MB, so a larger result cannot be kept. */
 const MAX_RESULT_BYTES = 1_900_000;
-const MIN_DIMENSION = 256;
 /** A submission that never recorded a provider id is given up after this. */
 const SUBMITTING_STALE_MS = 180_000;
 /** An async generation still pending after this is reported as failed. */
@@ -188,13 +187,13 @@ export function parseImageJobRequest(value: unknown): ImageJobRequest {
   };
 }
 
-export function isProviderConfigured(env: ImageEnv, provider: ImageProviderId): boolean {
+function isProviderConfigured(env: ImageEnv, provider: ImageProviderId): boolean {
   return provider === 'leonardo'
     ? Boolean(env.LEONARDO_API_KEY)
     : Boolean(env.CF_ACCOUNT_ID && env.CF_API_TOKEN);
 }
 
-export function providerConfigError(provider: ImageProviderId): string {
+function providerConfigError(provider: ImageProviderId): string {
   return provider === 'leonardo'
     ? 'Leonardo image generation is not configured. Add LEONARDO_API_KEY in Sites → Secrets, then redeploy.'
     : 'Cloudflare image generation is not configured. Add CF_ACCOUNT_ID and CF_API_TOKEN in Sites → Secrets, then redeploy.';
@@ -551,7 +550,6 @@ async function createWithLeonardo(
 interface LeonardoPoll {
   status: 'PENDING' | 'COMPLETE' | 'FAILED';
   imageUrl: string | null;
-  inferenceSeconds: number | null;
 }
 
 async function pollLeonardo(env: ImageEnv, generationId: string): Promise<LeonardoPoll> {
@@ -589,12 +587,7 @@ async function pollLeonardo(env: ImageEnv, generationId: string): Promise<Leonar
       }
     }
   }
-  return {
-    status,
-    imageUrl,
-    inferenceSeconds:
-      record && typeof record.inferenceTime === 'number' ? record.inferenceTime : null,
-  };
+  return { status, imageUrl };
 }
 
 async function downloadLeonardoImage(
@@ -689,8 +682,8 @@ export async function submitImageJob(
       spec.model,
       request.prompt,
       JSON.stringify(request.settings),
-      Math.max(MIN_DIMENSION, spec.width),
-      Math.max(MIN_DIMENSION, spec.height),
+      spec.width,
+      spec.height,
       now.toISOString(),
     )
     .all<{ id: string }>();
@@ -826,12 +819,13 @@ export async function refreshImageJob(
   // A failed download leaves the job queued so the next check can retry it; the
   // generation itself is already paid for.
   const image = await downloadLeonardoImage(polled.imageUrl);
+  // Leonardo reports no duration this code relies on, so measure the wait instead.
   await markCompleted(
     db,
     id,
     sub,
     image,
-    polled.inferenceSeconds ?? Math.round((Date.now() - new Date(job.createdAt).getTime()) / 10) / 100,
+    Math.round((Date.now() - new Date(job.createdAt).getTime()) / 10) / 100,
   );
   const finished = await readImageJob(db, sub, id);
   if (!finished) throw new ImageJobError(500, 'The image job could not be read.');

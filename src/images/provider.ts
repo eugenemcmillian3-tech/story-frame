@@ -116,10 +116,6 @@ export function imageModel(id: string): ImageModelSpec | null {
   return IMAGE_MODELS.find((candidate) => candidate.id === id) ?? null;
 }
 
-export function modelLabel(model: string): string {
-  return IMAGE_MODELS.find((candidate) => candidate.model === model)?.label ?? model;
-}
-
 export type ImageStyleId =
   | 'preset'
   | 'photo-editorial'

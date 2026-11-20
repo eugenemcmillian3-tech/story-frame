@@ -175,7 +175,9 @@ async function serveAsset(request: Request): Promise<Response> {
       headers: { 'content-type': CONTENT_TYPES[extname(candidate)] ?? 'application/octet-stream' },
     });
   } catch {
-    // The app is a single-page app: unknown paths fall back to index.html.
+    // The app is a single-page app: unknown routes fall back to index.html, but a
+    // missing file must stay a 404 rather than quietly becoming HTML.
+    if (extname(candidate) !== '') return new Response('Not found', { status: 404 });
     const index = await readFile(join(DIST, 'index.html'));
     return new Response(index, { headers: { 'content-type': 'text/html; charset=utf-8' } });
   }

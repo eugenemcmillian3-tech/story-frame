@@ -7,7 +7,6 @@ import {
   MAX_PROMPT_CHARS,
   buildSceneImagePrompt,
   imageModel,
-  modelLabel,
 } from '../src/images/provider';
 import { createSampleProject } from '../src/domain/sample';
 
@@ -40,8 +39,9 @@ describe('image provider registry', () => {
       reportsCredits: true,
     });
     expect(imageModel('leonardo-lucid-origin')?.model).toBe('lucid-origin');
-    expect(modelLabel('phoenix-v1.0')).toBe('Leonardo Phoenix 1.0');
-    expect(modelLabel('@cf/black-forest-labs/flux-1-schnell')).toBe('FLUX.1 Schnell');
+    expect(imageModel('phoenix-v1.0')).toBeNull();
+    expect(imageModel('leonardo-phoenix')?.label).toBe('Leonardo Phoenix 1.0');
+    expect(imageModel('cf-flux-schnell')?.label).toBe('FLUX.1 Schnell');
   });
 
   it('only quotes a price where the provider publishes one', () => {

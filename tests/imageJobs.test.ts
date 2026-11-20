@@ -100,7 +100,6 @@ function leonardoPoll(
   return Response.json({
     generations_by_pk: {
       status,
-      inferenceTime: 12.3,
       generated_images: status === 'COMPLETE' && url ? [{ url, id: 'img_1' }] : [],
     },
   });
@@ -172,7 +171,7 @@ describe('image job request validation', () => {
         modelId: 'leonardo-lucid-origin',
       }).settings.modelId,
     ).toBe('leonardo-lucid-origin');
-    expect(IMAGE_MODELS).toHaveLength(2 + 1);
+    expect(IMAGE_MODELS).toHaveLength(3);
   });
 
   it('rejects an unverified model, a blank prompt and a prompt over the model’s cap', () => {
@@ -261,7 +260,7 @@ describe('Leonardo.Ai', () => {
 
     const finished = await refreshImageJob(db as never, env, 'user_1', leonardoRequest.id);
     expect(finished.status).toBe('completed');
-    expect(finished.inferenceSeconds).toBe(12.3);
+    expect(finished.inferenceSeconds).toBeGreaterThanOrEqual(0);
     const file = await fetchImageJobImage(db as never, 'user_1', leonardoRequest.id);
     expect(Array.from(file.bytes)).toEqual(Array.from(JPEG));
   });
