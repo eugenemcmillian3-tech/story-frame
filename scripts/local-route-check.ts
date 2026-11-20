@@ -4,14 +4,16 @@
  * The browser flow needs a Google 2SV prompt that a headless run cannot answer,
  * so this drives the built Worker with the same @freebuff/auth SDK against a
  * stub OIDC issuer on loopback: real sign-in -> callback -> session cookie ->
- * POST /api/ai/plan, then one real Ollama call. It exercises our route, quota
- * and provider code; it is not a substitute for signing in to the deployed site.
+ * POST /api/ai/plan for all three operations, each reaching a real Ollama call.
+ * It exercises our route, quota and provider code; it is not a substitute for
+ * signing in to the deployed site.
  *
  * Run: npm run check:route
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { computeScriptFingerprint } from '../src/domain/fingerprint';
 import worker from '../worker/dist/index';
 
 const ISSUER = 'http://127.0.0.1:8799/oidc';
@@ -254,6 +256,32 @@ const anglesPayload = {
   },
 };
 
+const narration =
+  'A moving bicycle holds itself up, and the trick happens at the front wheel. When the bike leans, the front wheel steers toward the lean, moving the wheels back under the centre of mass. At very low speeds this self-correction is weaker, so the rider has to steer deliberately to keep balance.';
+
+const scriptPayload = {
+  operation: 'script',
+  model: 'deepseek-v4.1-flash',
+  input: {
+    ...anglesPayload.input,
+    angle: {
+      title: 'The lean that corrects itself',
+      hook: 'A moving bicycle holds itself up — the trick happens at the front wheel.',
+      approach: 'Follow a lean from the front wheel back to the rider.',
+      explanation: 'Steering geometry turns a fall into a correction.',
+    },
+  },
+};
+
+const storyboardPayload = {
+  operation: 'storyboard',
+  model: 'deepseek-v4.1-flash',
+  input: {
+    brief: anglesPayload.input.brief,
+    script: { narration, fingerprint: computeScriptFingerprint(narration) },
+  },
+};
+
 const signedOut = await call('/api/ai/plan', { method: 'POST', body: anglesPayload });
 check('signed-out request is rejected', signedOut.status === 401, `status ${signedOut.status}`);
 await signedOut.text();
@@ -296,23 +324,51 @@ const planBody = (await plan.json()) as {
 };
 const titles = (planBody.proposal?.angles ?? []).map((angle) => angle.title ?? '');
 check(
-  'signed-in request returns a real Ollama proposal',
+  'angles request returns a real Ollama proposal',
   plan.status === 200 && titles.length === 3,
   `${plan.status} ${Date.now() - started}ms model=${planBody.model ?? planBody.error ?? '?'} ${titles.join(' | ')}`,
 );
 
+const scriptReply = await call('/api/ai/plan', { method: 'POST', body: scriptPayload });
+const scriptBody = (await scriptReply.json()) as {
+  proposal?: { mode?: string; segments?: Array<{ claims?: unknown[] }> };
+  error?: string;
+};
+const segments = scriptBody.proposal?.segments ?? [];
+const claims = segments.reduce((total, segment) => total + (segment.claims?.length ?? 0), 0);
+check(
+  'script request returns a real Ollama proposal',
+  scriptReply.status === 200 && scriptBody.proposal?.mode === 'script' && segments.length > 0,
+  `${scriptReply.status} ${segments.length} segments, ${claims} claims${scriptBody.error ? ` — ${scriptBody.error}` : ''}`,
+);
+
+const storyboardReply = await call('/api/ai/plan', { method: 'POST', body: storyboardPayload });
+const storyboardBody = (await storyboardReply.json()) as {
+  proposal?: { scenes?: Array<{ plannedDuration?: number }> };
+  error?: string;
+};
+const scenes = storyboardBody.proposal?.scenes ?? [];
+const sceneSeconds = scenes.reduce((total, scene) => total + (scene.plannedDuration ?? 0), 0);
+check(
+  'storyboard request returns a real Ollama proposal',
+  storyboardReply.status === 200 && scenes.length > 0,
+  `${storyboardReply.status} ${scenes.length} scenes, ${sceneSeconds}s${storyboardBody.error ? ` — ${storyboardBody.error}` : ''}`,
+);
+
 const day = new Date().toISOString().slice(0, 10);
 const minute = new Date().toISOString().slice(0, 16);
+const dayCount = db.rows.get(`${USER_SUB}|d:${day}`) ?? 0;
+const minuteCount = db.rows.get(`${USER_SUB}|m:${minute}`) ?? 0;
 check(
-  'quota counted the request in D1',
-  db.rows.get(`${USER_SUB}|d:${day}`) === 1 && db.rows.get(`${USER_SUB}|m:${minute}`) === 1,
-  `day ${db.rows.get(`${USER_SUB}|d:${day}`) ?? 0}, minute ${db.rows.get(`${USER_SUB}|m:${minute}`) ?? 0}`,
+  'quota counted all three requests in D1',
+  dayCount === 3 && minuteCount > 0 && minuteCount <= 3,
+  `day ${dayCount}, minute ${minuteCount}`,
 );
 
 db.rows.set(`${USER_SUB}|d:${day}`, 40);
 const limited = await call('/api/ai/plan', { method: 'POST', body: anglesPayload });
 const limitedBody = (await limited.json()) as { error?: string };
-  check('daily limit is enforced', limited.status === 429, `${limited.status} ${limitedBody.error ?? ''}`);
+check('daily limit is enforced', limited.status === 429, `${limited.status} ${limitedBody.error ?? ''}`);
 
 const signout = await call('/auth/freebuff/signout', { method: 'POST' });
 check('sign-out completes', signout.status === 303, `status ${signout.status}`);
