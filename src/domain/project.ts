@@ -172,13 +172,15 @@ export function updateAudioTrack(
           ? null
           : Math.max(0, Math.round(patch.durationMs))
         : current.durationMs,
+    generated: patch.generated !== undefined ? patch.generated : current.generated,
   };
   if (
     current.assetId === next.assetId &&
     current.fileName === next.fileName &&
     current.durationMs === next.durationMs &&
     current.volume === next.volume &&
-    current.muted === next.muted
+    current.muted === next.muted &&
+    current.generated === next.generated
   ) {
     return project;
   }

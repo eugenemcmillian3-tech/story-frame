@@ -60,11 +60,14 @@ export async function cleanupProjectMedia(store: ProjectMediaCleanupSource): Pro
   return [...images, ...audio];
 }
 
-async function cleanupUnreferencedAssets(projects: Project[]): Promise<string[]> {
-  const referenced = referencedAssetIds(projects);
-  const assets = await listAllAssets();
-  // A replaced image is still reachable from the scene's current image, so its
-  // whole replacement chain has to survive cleanup for undo to work.
+/**
+ * A replaced record is still reachable from the current one, so its whole
+ * replacement chain has to survive cleanup for undo to work.
+ */
+function keepReplacementChains(
+  referenced: Set<string>,
+  assets: ReadonlyArray<{ id: string; replacesAssetId?: string | null }>,
+): void {
   const byId = new Map(assets.map((asset) => [asset.id, asset]));
   for (const id of [...referenced]) {
     let cursor = byId.get(id)?.replacesAssetId ?? null;
@@ -75,6 +78,12 @@ async function cleanupUnreferencedAssets(projects: Project[]): Promise<string[]>
       guard += 1;
     }
   }
+}
+
+async function cleanupUnreferencedAssets(projects: Project[]): Promise<string[]> {
+  const referenced = referencedAssetIds(projects);
+  const assets = await listAllAssets();
+  keepReplacementChains(referenced, assets);
   const deleted: string[] = [];
   for (const asset of assets) {
     if (referenced.has(asset.id)) continue;
@@ -87,6 +96,7 @@ async function cleanupUnreferencedAssets(projects: Project[]): Promise<string[]>
 async function cleanupUnreferencedAudio(projects: Project[]): Promise<string[]> {
   const referenced = referencedAudioAssetIds(projects);
   const assets = await listAllAudioAssets();
+  keepReplacementChains(referenced, assets);
   const deleted: string[] = [];
   for (const asset of assets) {
     if (referenced.has(asset.id)) continue;

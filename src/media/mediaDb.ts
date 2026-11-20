@@ -1,3 +1,4 @@
+import type { NarrationTake } from '../domain/types';
 import { isQuotaError } from '../persistence/storage';
 import type { RenderSnapshot } from '../render/snapshot';
 
@@ -53,6 +54,12 @@ export interface AudioAssetRecord {
   channels: number;
   createdAt: string;
   blob: Blob;
+  /** Absent on records written before generated narration existed; those are uploads. */
+  source?: 'upload' | 'generated';
+  /** Provenance for a generated take, so a reload can still explain the audio. */
+  generation?: NarrationTake | null;
+  /** The take this one replaced, kept so the previous narration can be restored. */
+  replacesAssetId?: string | null;
 }
 
 export interface StoredRenderAudio {

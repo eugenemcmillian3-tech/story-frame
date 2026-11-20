@@ -7,6 +7,8 @@ import { ACCEPTED_AUDIO_MIME_TYPES, storeAudioFile } from '../media/audioAssets'
 import { deleteAudioAsset, getAudioAsset } from '../media/mediaDb';
 import type { AudioAssetRecord } from '../media/mediaDb';
 import { cleanupProjectMedia } from '../media/cleanup';
+import { narrationVoiceLabel } from '../narration/provider';
+import { formatTimestamp } from '../format';
 import { useStore } from '../state/StoreProvider';
 
 function seconds(ms: number | null): string {
@@ -92,6 +94,8 @@ function AudioTrackField({
           assetId: stored.id,
           fileName: stored.name,
           durationMs: stored.durationMs,
+          // An upload replaces any generated take, so its provenance goes with it.
+          generated: null,
         }),
       );
       if (!applied.ok) {
@@ -111,12 +115,13 @@ function AudioTrackField({
   const handleRemove = () => {
     audioRef.current?.pause();
     const applied = store.mutate((current) =>
-      updateAudioTrack(current, role, {
-        assetId: null,
-        fileName: null,
-        durationMs: null,
-        muted: false,
-      }),
+              updateAudioTrack(current, role, {
+          assetId: null,
+          fileName: null,
+          durationMs: null,
+          muted: false,
+          generated: null,
+        }),
     );
     if (!applied.ok) {
       setError(applied.message ?? 'The audio was not removed.');
@@ -176,6 +181,15 @@ function AudioTrackField({
               {record.mimeType}
             </span>
             <span className="media-asset-id">Audio {record.id.slice(0, 16)}…</span>
+            {track.generated ? (
+              <span>
+                Generated with {narrationVoiceLabel(track.generated.voice)} ·{' '}
+                {formatTimestamp(track.generated.generatedAt)}
+                {track.generated.scriptFingerprint !== project.script.fingerprint
+                  ? ' · the script has changed since, so this narration may be outdated'
+                  : ''}
+              </span>
+            ) : null}
           </div>
           <audio
             ref={audioRef}

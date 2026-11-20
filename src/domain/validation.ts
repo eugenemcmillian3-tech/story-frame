@@ -7,6 +7,7 @@ import type {
   AudioTrackSettings,
   Brief,
   ImageFraming,
+  NarrationTake,
   PlanningBudget,
   PlanningNote,
   Project,
@@ -291,6 +292,36 @@ function emptyAudioTrack(): AudioTrackSettings {
   return { assetId: null, fileName: null, durationMs: null, volume: 1, muted: false };
 }
 
+function readNarrationTake(
+  reader: Reader,
+  source: unknown,
+  path: string,
+): NarrationTake | null {
+  if (source === undefined || source === null) return null;
+  const record = reader.record(source, path);
+  return {
+    provider: reader.string(record, 'provider', `${path}.provider`, 100),
+    model: reader.string(record, 'model', `${path}.model`, 200),
+    voice: reader.string(record, 'voice', `${path}.voice`, 100),
+    scriptFingerprint: reader.string(
+      record,
+      'scriptFingerprint',
+      `${path}.scriptFingerprint`,
+      200,
+    ),
+    characters: reader.number(record, 'characters', `${path}.characters`, 0, 1_000_000),
+    estimatedUsd: reader.nullableNumber(
+      record,
+      'estimatedUsd',
+      `${path}.estimatedUsd`,
+      0,
+      1_000_000,
+    ),
+    jobId: reader.string(record, 'jobId', `${path}.jobId`, 200),
+    generatedAt: reader.string(record, 'generatedAt', `${path}.generatedAt`, 64),
+  };
+}
+
 function readAudioTrack(reader: Reader, source: unknown, role: string): AudioTrackSettings {
   const path = `audio.${role}`;
   const record = reader.record(source, path);
@@ -300,6 +331,7 @@ function readAudioTrack(reader: Reader, source: unknown, role: string): AudioTra
     durationMs: reader.nullableNumber(record, 'durationMs', `${path}.durationMs`, 0, 36_000_000),
     volume: record.volume === undefined ? 1 : reader.number(record, 'volume', `${path}.volume`, 0, 1),
     muted: record.muted === undefined ? false : reader.boolean(record, 'muted', `${path}.muted`),
+    generated: readNarrationTake(reader, record.generated, `${path}.generated`),
   };
 }
 

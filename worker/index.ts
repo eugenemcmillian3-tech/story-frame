@@ -14,6 +14,13 @@ import {
   refreshImageJob,
   submitImageJob,
 } from './imageJobs';
+import {
+  NarrationError,
+  ensureNarrationSchema,
+  generateNarration,
+  listNarrationUsage,
+  parseNarrationRequest,
+} from './narration';
 
 interface D1PreparedStatement {
   bind(...values: unknown[]): D1PreparedStatement;
@@ -42,6 +49,8 @@ interface Env {
 
 const MAX_BODY_BYTES = 180_000;
 const MAX_IMAGE_BODY_BYTES = 100_000;
+/** A narration request carries script text only: the provider streams the audio back. */
+const MAX_NARRATION_BODY_BYTES = 30_000;
 const DAILY_LIMIT = 40;
 const MINUTE_LIMIT = 6;
 /** Image generations are billed per image, so they get their own smaller budget. */
@@ -690,6 +699,83 @@ async function handleImageJobCancel(
   }
 }
 
+/**
+ * Generates one narration take and answers with the MP3 bytes themselves. The
+ * job metadata travels in headers so the audio is not wrapped in base64 JSON.
+ */
+async function handleNarrationCreate(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+): Promise<Response> {
+  if (request.method !== 'POST') {
+    return jsonError('Use POST to generate narration.', 405, { Allow: 'POST' });
+  }
+  if (!isSameOriginRequest(request, env.APP_ORIGIN)) {
+    return jsonError('This request did not come from this site.', 403);
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to generate narration.', 401);
+  if (!env.DB) {
+    return jsonError('The narration job database is not attached to this deployment.', 503);
+  }
+  const raw = await readBoundedText(request, MAX_NARRATION_BODY_BYTES);
+  if (raw === null) return jsonError('The narration request is too large.', 413);
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return jsonError('The narration request is not valid JSON.', 400);
+  }
+  try {
+    const parsed = parseNarrationRequest(body);
+    await ensureNarrationSchema(env.DB);
+    const generated = await generateNarration(env.DB, env, user.sub, parsed);
+    const bytes = generated.bytes;
+    return new Response(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, {
+      status: 201,
+      headers: {
+        'Content-Type': generated.mimeType,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Narration-Job-Id': generated.job.id,
+        'X-Narration-Model': generated.job.model,
+        'X-Narration-Voice': generated.job.voice,
+        'X-Narration-Characters': String(generated.job.characters),
+        'X-Narration-Estimated-Usd': generated.job.estimatedUsd.toFixed(6),
+        'X-Narration-Attempts': String(generated.job.attempts),
+      },
+    });
+  } catch (error) {
+    if (error instanceof NarrationError) return jsonError(error.message, error.status);
+    console.error('Narration generation failed');
+    return jsonError('Narration is unavailable right now.', 500);
+  }
+}
+
+/** Today's narration jobs and estimated spend for this account. */
+async function handleNarrationUsage(
+  request: Request,
+  env: Env,
+  authInstance: FreebuffAuth,
+): Promise<Response> {
+  if (request.method !== 'GET') {
+    return jsonError('Use GET for narration usage.', 405, { Allow: 'GET' });
+  }
+  const user = await authInstance.getUser(request);
+  if (!user) return jsonError('Sign in with Freebuff to see narration usage.', 401);
+  if (!env.DB) {
+    return jsonError('The narration job database is not attached to this deployment.', 503);
+  }
+  try {
+    await ensureNarrationSchema(env.DB);
+    return jsonOk(await listNarrationUsage(env.DB, user.sub));
+  } catch {
+    console.error('Narration usage route failed');
+    return jsonError('Narration usage is unavailable right now.', 500);
+  }
+}
+
 function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
   auth ??= createFreebuffAuth({
     clientId: env.FREEBUFF_CLIENT_ID,
@@ -716,6 +802,22 @@ function setup(env: Env): (request: Request, env: Env) => Promise<Response> {
       } catch {
         console.error('AI route failed');
         return jsonError('The AI planning service is unavailable right now.', 500);
+      }
+    }
+    if (url.pathname === '/api/narration/jobs') {
+      try {
+        return await handleNarrationCreate(request, requestEnv, authInstance);
+      } catch {
+        console.error('Narration route failed');
+        return jsonError('Narration is unavailable right now.', 500);
+      }
+    }
+    if (url.pathname === '/api/narration/usage') {
+      try {
+        return await handleNarrationUsage(request, requestEnv, authInstance);
+      } catch {
+        console.error('Narration usage route failed');
+        return jsonError('Narration usage is unavailable right now.', 500);
       }
     }
     if (url.pathname === '/api/images/jobs') {

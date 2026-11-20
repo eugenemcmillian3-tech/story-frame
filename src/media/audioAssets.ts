@@ -1,4 +1,5 @@
 import { newId } from '../domain/ids';
+import type { NarrationTake } from '../domain/types';
 import { putAudioAsset } from './mediaDb';
 import type { AudioAssetRecord } from './mediaDb';
 
@@ -102,6 +103,42 @@ export async function storeAudioFile(
     channels: decoded.channels,
     createdAt: new Date().toISOString(),
     blob: file,
+    source: 'upload',
+    generation: null,
+    replacesAssetId: null,
+  };
+  await putAudioAsset(record);
+  return record;
+}
+
+/**
+ * Store generated narration exactly like an upload, but keep its provenance and
+ * the take it replaces. The duration is decoded from the returned bytes, never
+ * taken from the provider's word.
+ */
+export async function storeGeneratedNarration(
+  projectId: string,
+  blob: Blob,
+  take: NarrationTake,
+  replacesAssetId: string | null,
+): Promise<AudioAssetRecord> {
+  const fileName = `narration-${take.voice}-${take.jobId.slice(-6)}.mp3`;
+  const file = new File([blob], fileName, { type: blob.type || 'audio/mpeg' });
+  const decoded = await decodeAudioFile(file);
+  const record: AudioAssetRecord = {
+    id: newId('aud'),
+    projectId,
+    name: fileName,
+    mimeType: file.type,
+    byteSize: file.size,
+    durationMs: decoded.durationMs,
+    sampleRate: decoded.sampleRate,
+    channels: decoded.channels,
+    createdAt: new Date().toISOString(),
+    blob: file,
+    source: 'generated',
+    generation: take,
+    replacesAssetId,
   };
   await putAudioAsset(record);
   return record;

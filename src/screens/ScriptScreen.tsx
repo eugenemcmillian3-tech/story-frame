@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { AiScriptPlanner } from '../components/AiPlanning';
 import { Dialog } from '../components/Dialog';
+import { NarrationPanel } from '../components/NarrationPanel';
 import { Badge, Panel, TextAreaField, TextField } from '../components/ui';
 import { NARRATION_WORDS_PER_MINUTE } from '../domain/constants';
 import { countWords, estimateRuntimeSeconds, formatDuration } from '../domain/duration';
@@ -156,6 +157,8 @@ export function ScriptScreen({ project }: { project: Project }) {
           AI. Loading one replaces the narration and keeps the current text as a previous version.
         </p>
       </Panel>
+
+      <NarrationPanel project={project} />
 
       {script.versions.length > 0 ? (
         <Panel

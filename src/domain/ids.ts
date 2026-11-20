@@ -1,4 +1,14 @@
-export type IdPrefix = 'prj' | 'scn' | 'src' | 'ver' | 'ast' | 'img' | 'aud' | 'rnd' | 'note';
+export type IdPrefix =
+  | 'prj'
+  | 'scn'
+  | 'src'
+  | 'ver'
+  | 'ast'
+  | 'img'
+  | 'aud'
+  | 'rnd'
+  | 'note'
+  | 'nar';
 
 let fallbackCounter = 0;
 

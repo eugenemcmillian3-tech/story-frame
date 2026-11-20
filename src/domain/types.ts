@@ -111,6 +111,24 @@ export interface Scene {
 
 export type AudioTrackRole = 'narration' | 'music';
 
+/**
+ * Provenance for narration this app generated, stored with the take so a later
+ * script edit can be compared against the exact text that was spoken.
+ */
+export interface NarrationTake {
+  provider: string;
+  model: string;
+  /** The provider's speaker id. */
+  voice: string;
+  /** Fingerprint of the saved script the audio was generated from. */
+  scriptFingerprint: string;
+  characters: number;
+  /** Published list price for those characters, or null when none is quoted. */
+  estimatedUsd: number | null;
+  jobId: string;
+  generatedAt: string;
+}
+
 /** Uploaded audio metadata. The bytes live in IndexedDB under `assetId`. */
 export interface AudioTrackSettings {
   assetId: string | null;
@@ -119,6 +137,11 @@ export interface AudioTrackSettings {
   /** Linear gain from 0 to 1. The UI exposes this as 0–100%. */
   volume: number;
   muted: boolean;
+  /**
+   * Set only while the track holds app-generated narration. An uploaded file
+   * clears it, so a stale take can never describe an upload.
+   */
+  generated?: NarrationTake | null;
 }
 
 export interface ProjectAudio {
