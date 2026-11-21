@@ -413,6 +413,54 @@ describe('GET /api/ai/quota', () => {
     expect(providerFetch).not.toHaveBeenCalled();
   });
 
+  it('opens a fresh minute at the boundary without dropping the old count', async () => {
+    const db = fakeDb([
+      ['user_1', DAY_KEY, 4],
+      ['user_1', MINUTE_KEY, 2],
+    ]);
+    const nextMinute = new Date(NOW.getTime() + 60_000);
+    const nextMinuteKey = `m:${nextMinute.toISOString().slice(0, 16)}`;
+    vi.setSystemTime(nextMinute);
+
+    const response = await worker.fetch(get(), testEnv(db) as never);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.daily).toEqual({ used: 4, limit: 40, remaining: 36 });
+    expect(body.minute).toEqual({ used: 0, limit: 6, remaining: 6 });
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(2);
+
+    providerFetch.mockResolvedValue(chatReply(JSON.stringify(anglesProposal)));
+    expect((await worker.fetch(post(payload), testEnv(db) as never)).status).toBe(200);
+    expect(db.rows.get(`user_1|${nextMinuteKey}`)).toBe(1);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(2);
+  });
+
+  it('opens a fresh UTC day at the boundary while keeping yesterday’s usage', async () => {
+    const db = fakeDb([
+      ['user_1', DAY_KEY, 4],
+      ['user_1', MINUTE_KEY, 2],
+    ]);
+    const nextDay = new Date('2026-01-02T00:00:30.000Z');
+    const nextDayKey = `d:${nextDay.toISOString().slice(0, 10)}`;
+    const nextMinuteKey = `m:${nextDay.toISOString().slice(0, 16)}`;
+    vi.setSystemTime(nextDay);
+
+    const response = await worker.fetch(get(), testEnv(db) as never);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.daily).toEqual({ used: 0, limit: 40, remaining: 40 });
+    expect(body.minute).toEqual({ used: 0, limit: 6, remaining: 6 });
+    expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(4);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(2);
+
+    providerFetch.mockResolvedValue(chatReply(JSON.stringify(anglesProposal)));
+    expect((await worker.fetch(post(payload), testEnv(db) as never)).status).toBe(200);
+    expect(db.rows.get(`user_1|${nextDayKey}`)).toBe(1);
+    expect(db.rows.get(`user_1|${nextMinuteKey}`)).toBe(1);
+    expect(db.rows.get(`user_1|${DAY_KEY}`)).toBe(4);
+    expect(db.rows.get(`user_1|${MINUTE_KEY}`)).toBe(2);
+  });
+
   it('reports an untouched budget for a user with no usage', async () => {
     const response = await worker.fetch(get(), testEnv() as never);
     const body = (await response.json()) as Record<string, { remaining: number }>;

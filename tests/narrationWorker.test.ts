@@ -142,6 +142,27 @@ function request(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function storedJob(id: string, createdAt = NOW.toISOString()): Row {
+  return {
+    id,
+    user_sub: 'user_1',
+    project_id: null,
+    purpose: 'sample',
+    provider: 'Deepgram',
+    model: 'aura-1',
+    voice: 'aura-luna-en',
+    characters: 10,
+    estimated_usd: 0.00015,
+    script_fingerprint: null,
+    status: 'completed',
+    attempts: 1,
+    provider_status: 200,
+    error: null,
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+}
+
 function mp3(): Response {
   return new Response(new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3]), {
     status: 200,
@@ -273,35 +294,49 @@ describe('narration generation', () => {
       calls += 1;
       return mp3();
     });
-    const now = new Date().toISOString();
-    for (let index = 0; index < 20; index += 1) {
-      db.rows.push({
-        ...({
-          id: `old_${index}`,
-          user_sub: 'user_1',
-          project_id: null,
-          purpose: 'sample',
-          provider: 'Deepgram',
-          model: 'aura-1',
-          voice: 'aura-luna-en',
-          characters: 10,
-          estimated_usd: 0.00015,
-          script_fingerprint: null,
-          status: 'completed',
-          attempts: 1,
-          provider_status: 200,
-          error: null,
-          created_at: now,
-          updated_at: now,
-        } satisfies Row),
-      });
-    }
+    for (let index = 0; index < 20; index += 1) db.rows.push(storedJob(`old_${index}`));
     await expect(generateNarration(db, ENV, 'user_1', request())).rejects.toThrow(/all 20 narration/i);
     expect(calls).toBe(0);
   });
 });
 
 describe('narration usage', () => {
+  it('opens a fresh minute at the boundary while keeping the earlier take', async () => {
+    const db = new FakeDb();
+    db.rows.push(storedJob('old_minute'));
+    const nextMinute = new Date(NOW.getTime() + 60_000);
+    vi.setSystemTime(nextMinute);
+
+    const usage = await listNarrationUsage(db, 'user_1');
+    expect(usage.usedToday).toBe(1);
+    expect(usage.usedThisMinute).toBe(0);
+    expect(db.rows).toHaveLength(1);
+    expect(db.rows[0].created_at).toBe(NOW.toISOString());
+
+    vi.stubGlobal('fetch', async () => mp3());
+    await generateNarration(db, ENV, 'user_1', request({ id: 'nar_after_minute' }));
+    expect(db.rows).toHaveLength(2);
+    expect(db.rows[1].created_at).toBe(nextMinute.toISOString());
+  });
+
+  it('opens a fresh UTC day at the boundary while keeping yesterday’s takes', async () => {
+    const db = new FakeDb();
+    for (let index = 0; index < 20; index += 1) db.rows.push(storedJob(`old_${index}`));
+    const nextDay = new Date('2026-01-02T00:00:30.000Z');
+    vi.setSystemTime(nextDay);
+
+    const usage = await listNarrationUsage(db, 'user_1');
+    expect(usage.usedToday).toBe(0);
+    expect(usage.usedThisMinute).toBe(0);
+    expect(db.rows).toHaveLength(20);
+    expect(db.rows.every((row) => row.created_at === NOW.toISOString())).toBe(true);
+
+    vi.stubGlobal('fetch', async () => mp3());
+    await generateNarration(db, ENV, 'user_1', request({ id: 'nar_after_day' }));
+    expect(db.rows).toHaveLength(21);
+    expect(db.rows[20].created_at).toBe(nextDay.toISOString());
+  });
+
   it('reports jobs, spend and the minute window', async () => {
     const db = new FakeDb();
     vi.stubGlobal('fetch', async () => mp3());
