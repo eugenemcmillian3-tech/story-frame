@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   NarrationError,
   generateNarration,
@@ -7,6 +7,9 @@ import {
 } from '../worker/narration';
 
 const ENV = { DEEPGRAM_API_KEY: 'dg_key', DEEPGRAM_API_BASE: 'https://speak.test' };
+
+// Jobs seeded and windows read must share a day and minute, even on a boundary.
+const NOW = new Date('2026-01-01T00:00:30.000Z');
 
 interface Row {
   id: string;
@@ -146,8 +149,14 @@ function mp3(): Response {
   });
 }
 
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('narration request validation', () => {
